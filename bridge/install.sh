@@ -13,7 +13,11 @@ termux-reload-settings || true
 mkdir -p $PREFIX/var/service/claude-droid/log
 cat > $PREFIX/var/service/claude-droid/run <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
-exec node ~/claude-droid/server.mjs 2>&1
+export HOME=/data/data/com.termux/files/home
+export PATH=/data/data/com.termux/files/usr/bin:$PATH
+export TMPDIR=/data/data/com.termux/files/usr/tmp
+cd "$HOME"
+exec /data/data/com.termux/files/usr/bin/node "$HOME/claude-droid/server.mjs" 2>&1
 EOF
 chmod +x $PREFIX/var/service/claude-droid/run
 ln -sf $PREFIX/share/termux-services/svlogger $PREFIX/var/service/claude-droid/log/run

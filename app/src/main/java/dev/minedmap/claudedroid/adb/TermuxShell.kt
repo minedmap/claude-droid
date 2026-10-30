@@ -30,7 +30,7 @@ class TermuxShell(private val ctx: Context) : PrivilegedShell {
     return run("$PREFIX/bin/adb", args)
   }
 
-  suspend fun startBridge() = run("$PREFIX/bin/sv", arrayOf("up", "claude-droid"))
+  suspend fun startBridge() = run("$PREFIX/bin/sv", arrayOf("up", "$PREFIX/var/service/claude-droid"))
 
   private suspend fun run(path: String, args: Array<String>): Result<String> {
     val id = counter.incrementAndGet()
