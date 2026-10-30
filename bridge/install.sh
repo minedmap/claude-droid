@@ -17,11 +17,22 @@ export HOME=/data/data/com.termux/files/home
 export PATH=/data/data/com.termux/files/usr/bin:$PATH
 export TMPDIR=/data/data/com.termux/files/usr/tmp
 cd "$HOME"
+[ -x "$HOME/claude-droid/claude-proot" ] && export CLAUDE_BIN="$HOME/claude-droid/claude-proot"
 exec /data/data/com.termux/files/usr/bin/node "$HOME/claude-droid/server.mjs" 2>&1
 EOF
 chmod +x $PREFIX/var/service/claude-droid/run
 ln -sf $PREFIX/share/termux-services/svlogger $PREFIX/var/service/claude-droid/log/run
 sv-enable claude-droid || true
 sv up claude-droid || true
+# Ubuntu(proot) 안의 최신 Claude Code 사용 (Android용 네이티브 바이너리 없음)
+if proot-distro login ubuntu -- test -x /root/.local/bin/claude 2>/dev/null; then
+  cat > ~/claude-droid/claude-proot <<'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+H=/data/data/com.termux/files/home
+exec proot-distro login ubuntu --bind "$H:$H" --work-dir "$PWD" -- env HOME=/root PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin /root/.local/bin/claude "$@"
+EOF
+  chmod +x ~/claude-droid/claude-proot
+  echo "claude: proot ubuntu 사용"
+fi
 termux-wake-lock
 echo "TOKEN: $(cat ~/.claude-droid-token)   <- 앱 설정에 붙여넣기"

@@ -62,5 +62,5 @@ function readJson(req) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
   const token = fs.readFileSync(path.join(os.homedir(), '.claude-droid-token'), 'utf8').trim();
-  createBridge({ token }).listen(8765, '127.0.0.1', () => console.log('bridge on 127.0.0.1:8765'));
+  createBridge({ token, claudeBin: process.env.CLAUDE_BIN || 'claude' }).listen(8765, '127.0.0.1', () => console.log('bridge on 127.0.0.1:8765'));
 }
