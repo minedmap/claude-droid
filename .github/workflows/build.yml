@@ -1,0 +1,16 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: cd bridge && chmod +x test/fake-claude.sh && node --test
+      - run: chmod +x gradlew && ./gradlew --no-daemon testDebugUnitTest assembleDebug
+        env: { ANDROID_HOME: /usr/local/lib/android/sdk }
+      - uses: actions/upload-artifact@v4
+        with: { name: apk, path: app/build/outputs/apk/debug/*.apk }
