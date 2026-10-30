@@ -14,5 +14,11 @@ class StreamParserTest {
   @Test fun done() = assertEquals(listOf(UiEvent.Done(0, "")),
     StreamParser.parse("""{"type":"done","code":0,"stderr":""}"""))
   @Test fun unknownIgnored() = assertEquals(emptyList<UiEvent>(), StreamParser.parse("""{"type":"zzz"}"""))
+  @Test fun delta() = assertEquals(listOf(UiEvent.Delta("he")),
+    StreamParser.parse("""{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"he"}}}"""))
+  @Test fun otherStreamEventIgnored() = assertEquals(emptyList<UiEvent>(),
+    StreamParser.parse("""{"type":"stream_event","event":{"type":"message_start"}}"""))
+  @Test fun cost() = assertEquals(listOf(UiEvent.Result("ok", 0.0123)),
+    StreamParser.parse("""{"type":"result","result":"ok","total_cost_usd":0.0123}"""))
   @Test fun garbage() = assertEquals(listOf(UiEvent.Raw("not json")), StreamParser.parse("not json"))
 }

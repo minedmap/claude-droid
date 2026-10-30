@@ -10,6 +10,7 @@ sealed interface UiEvent {
   data class Result(val text: String, val costUsd: Double?) : UiEvent
   data class Done(val code: Int, val stderr: String) : UiEvent
   data class Raw(val text: String) : UiEvent
+  data class Delta(val text: String) : UiEvent
 }
 
 object StreamParser {
@@ -29,6 +30,12 @@ object StreamParser {
       }
       "result" -> listOf(UiEvent.Result(o.optString("result"),
         if (o.has("total_cost_usd")) o.getDouble("total_cost_usd") else null))
+      "stream_event" -> {
+        val e = o.optJSONObject("event")
+        val d = e?.optJSONObject("delta")
+        if (e?.optString("type") == "content_block_delta" && d?.optString("type") == "text_delta")
+          listOf(UiEvent.Delta(d.optString("text"))) else emptyList()
+      }
       "done" -> listOf(UiEvent.Done(o.optInt("code"), o.optString("stderr")))
       "raw" -> listOf(UiEvent.Raw(o.optString("text")))
       else -> emptyList()

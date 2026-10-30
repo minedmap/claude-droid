@@ -30,6 +30,7 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
     dao.messages(sid).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
   val session = MutableStateFlow<SessionEntity?>(null)
   val isRunning = MutableStateFlow(false)
+  val partial = MutableStateFlow("")
   val bridgeUp = MutableStateFlow<Boolean?>(null)
   private var currentReq: String? = null
 
@@ -66,11 +67,12 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
               claudeId = ev.id
               dao.session(sid)?.let { dao.update(it.copy(claudeSessionId = ev.id)) }
             }
-            is UiEvent.AssistantText -> add("assistant", ev.text)
+            is UiEvent.Delta -> partial.value += ev.text
+            is UiEvent.AssistantText -> { partial.value = ""; add("assistant", ev.text) }
             is UiEvent.ToolUse -> add("tool", "${ev.name}: ${ev.input}")
             is UiEvent.ToolResult -> add("tool_result", ev.text.take(4000))
             is UiEvent.Raw -> add("tool_result", ev.text)
-            is UiEvent.Result -> {}
+            is UiEvent.Result -> ev.costUsd?.let { add("tool_result", "💰 $" + String.format(java.util.Locale.US, "%.4f", it)) }
             is UiEvent.Done -> if (ev.code != 0) add("error", ev.stderr.ifBlank { "exit ${ev.code}" })
           }
         }
@@ -85,6 +87,7 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
           dao.session(sid)?.let { dao.update(it.copy(updatedAt = System.currentTimeMillis())) }
           session.value = dao.session(sid)
           currentReq = null
+          if (partial.value.isNotEmpty()) { add("assistant", partial.value); partial.value = "" }
           isRunning.value = false
         }
       }

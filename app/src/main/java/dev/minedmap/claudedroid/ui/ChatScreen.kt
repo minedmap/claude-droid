@@ -55,10 +55,14 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   val running by vm.isRunning.collectAsState()
   val up by vm.bridgeUp.collectAsState()
   val session by vm.session.collectAsState()
+  val partial by vm.partial.collectAsState()
   var input by remember { mutableStateOf("") }
   val listState = rememberLazyListState()
 
-  LaunchedEffect(msgs.size) { if (msgs.isNotEmpty()) listState.animateScrollToItem(msgs.size - 1) }
+  LaunchedEffect(msgs.size, partial.length / 200) {
+    val n = msgs.size + if (partial.isNotEmpty()) 1 else 0
+    if (n > 0) listState.scrollToItem(n - 1)
+  }
 
   Scaffold(
     contentWindowInsets = WindowInsets(0),
@@ -82,6 +86,7 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
       LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState,
         verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
         items(msgs, key = { it.id }) { Bubble(it) }
+        if (partial.isNotEmpty()) item(key = "partial") { Markdown(content = partial, modifier = Modifier.fillMaxWidth()) }
       }
       Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
         OutlinedTextField(input, { input = it }, Modifier.weight(1f), maxLines = 6, enabled = !running,

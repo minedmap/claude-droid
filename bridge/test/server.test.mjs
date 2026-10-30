@@ -46,6 +46,24 @@ test('invalid effort ignored', async () => {
   const { events } = await chat({ prompt: 'yo', model: '', effort: 'bogus' });
   assert.doesNotMatch(events[0].args, /--effort|--model/);
 });
+test('bad JSON -> 400, server survives', async () => {
+  const r = await fetch(base + '/chat', { method: 'POST', headers: H, body: '{bad' });
+  assert.equal(r.status, 400);
+  assert.equal((await fetch(base + '/health', { headers: H })).status, 200);
+});
+test('partial messages flag on', async () => {
+  const { events } = await chat({ prompt: 'yo' });
+  assert.match(events[0].args, /--include-partial-messages/);
+});
+test('cancel kills whole process group fast', async () => {
+  const t0 = Date.now();
+  const p = chat({ prompt: 'SLOWCHILD', reqId: 'r1' });
+  await new Promise(r => setTimeout(r, 400));
+  await fetch(base + '/cancel', { method: 'POST', headers: H, body: JSON.stringify({ reqId: 'r1' }) });
+  const { events } = await p;
+  assert.equal(events.at(-1).type, 'done');
+  assert.ok(Date.now() - t0 < 5000);
+});
 test('404 unknown route', async () => {
   assert.equal((await fetch(base + '/nope', { headers: H })).status, 404);
 });
