@@ -25,11 +25,12 @@ ln -sf $PREFIX/share/termux-services/svlogger $PREFIX/var/service/claude-droid/l
 sv-enable claude-droid || true
 sv up claude-droid || true
 # Ubuntu(proot) 안의 최신 Claude Code 사용 (Android용 네이티브 바이너리 없음)
+rm -f ~/claude-droid/claude-proot
 if proot-distro login ubuntu -- test -x /root/.local/bin/claude 2>/dev/null; then
   cat > ~/claude-droid/claude-proot <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 H=/data/data/com.termux/files/home
-exec proot-distro login ubuntu --bind "$H:$H" --work-dir "$PWD" -- env HOME=/root PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin /root/.local/bin/claude "$@"
+exec proot-distro login ubuntu --work-dir "$PWD" -- env IS_SANDBOX=1 HOME=/root PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin /root/.local/bin/claude "$@"
 EOF
   chmod +x ~/claude-droid/claude-proot
   echo "claude: proot ubuntu 사용"

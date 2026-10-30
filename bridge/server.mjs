@@ -31,7 +31,7 @@ export function createBridge({ token, claudeBin = 'claude' }) {
       if (sessionId) args.push('--resume', sessionId);
       if (skipPerms) args.push('--dangerously-skip-permissions');
       const dir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
-      const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir() } });
+      const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir() }, stdio: ['ignore', 'pipe', 'pipe'] });
       running.set(reqId, child);
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
       const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
