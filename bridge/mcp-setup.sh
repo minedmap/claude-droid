@@ -10,6 +10,9 @@ if ! command -v node >/dev/null || [ "$(node -p "process.versions.node.split(\".
   apt install -y nodejs
 fi
 command -v adb >/dev/null || apt install -y adb
+# Termux adb 키 공유 → 무선 디버깅 재페어링 불필요
+T=/data/data/com.termux/files/home/.android
+if [ -f "$T/adbkey" ]; then mkdir -p /root/.android && cp -f "$T/adbkey" "$T/adbkey.pub" /root/.android/; fi
 npm i -g claude-in-mobile
 claude mcp remove -s user mobile >/dev/null 2>&1 || true
 claude mcp add -s user mobile -- claude-in-mobile
