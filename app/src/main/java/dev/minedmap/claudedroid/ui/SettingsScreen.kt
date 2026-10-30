@@ -32,7 +32,8 @@ import dev.minedmap.claudedroid.data.Prefs
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onConnect: () -> Unit) {
-  val prefs = remember { Prefs(LocalContext.current) }
+  val ctx = LocalContext.current
+  val prefs = remember { Prefs(ctx) }
   var url by remember { mutableStateOf(prefs.bridgeUrl) }
   var token by remember { mutableStateOf(prefs.token) }
   var skip by remember { mutableStateOf(prefs.skipPerms) }
