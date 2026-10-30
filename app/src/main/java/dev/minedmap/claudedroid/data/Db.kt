@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.Flow
   childColumns = ["sessionId"], onDelete = ForeignKey.CASCADE)], indices = [Index("sessionId")])
 data class MessageEntity(
   @PrimaryKey(autoGenerate = true) val id: Long = 0,
-  val sessionId: Long, val role: String /* user|assistant|tool|tool_result|error */, val text: String, val ts: Long)
+  val sessionId: Long, val role: String /* user|assistant|tool|tool_result|tool_error|error|file|image|info */, val text: String, val ts: Long)
 
 @Dao interface ChatDao {
   @Query("SELECT * FROM SessionEntity ORDER BY updatedAt DESC") fun sessions(): Flow<List<SessionEntity>>
@@ -20,6 +20,12 @@ data class MessageEntity(
   @Query("SELECT * FROM MessageEntity WHERE sessionId=:sid ORDER BY id") fun messages(sid: Long): Flow<List<MessageEntity>>
   @Insert suspend fun insert(s: SessionEntity): Long
   @Update suspend fun update(s: SessionEntity)
+  @Query("SELECT * FROM SessionEntity WHERE id=:id") fun sessionFlow(id: Long): Flow<SessionEntity?>
+  @Query("UPDATE SessionEntity SET title=:title WHERE id=:id") suspend fun setTitle(id: Long, title: String)
+  @Query("UPDATE SessionEntity SET claudeSessionId=:cid WHERE id=:id") suspend fun setClaudeSession(id: Long, cid: String?)
+  @Query("UPDATE SessionEntity SET updatedAt=:ts WHERE id=:id") suspend fun touch(id: Long, ts: Long)
+  @Query("UPDATE SessionEntity SET model=:m WHERE id=:id") suspend fun setModel(id: Long, m: String?)
+  @Query("UPDATE SessionEntity SET effort=:e WHERE id=:id") suspend fun setEffort(id: Long, e: String?)
   @Delete suspend fun delete(s: SessionEntity)
   @Insert suspend fun insert(m: MessageEntity): Long
 }

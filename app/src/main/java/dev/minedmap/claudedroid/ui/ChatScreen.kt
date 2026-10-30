@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.InputChip
 import androidx.compose.foundation.background
@@ -50,6 +51,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,6 +67,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mikepenz.markdown.m3.Markdown
 import dev.minedmap.claudedroid.data.MessageEntity
+import dev.minedmap.claudedroid.net.ChatLogic
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,6 +95,7 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   val adb by vm.adbUp.collectAsState()
   val session by vm.session.collectAsState()
   val partial by vm.partial.collectAsState()
+  val status by vm.status.collectAsState()
   var input by remember { mutableStateOf("") }
   val listState = rememberLazyListState()
   val ctx = LocalContext.current
@@ -99,9 +107,28 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   }
   LaunchedEffect(Unit) { vm.toast.collect { Toast.makeText(ctx, it, Toast.LENGTH_SHORT).show() } }
 
+  val uiScope = rememberCoroutineScope()
+  // near-bottom is sampled whenever scrolling goes idle, so a burst of new items cannot make us "lose" the bottom
+  val nearBottom by remember {
+    derivedStateOf {
+      val li = listState.layoutInfo
+      val last = li.visibleItemsInfo.lastOrNull()
+      li.totalItemsCount == 0 || (last != null && last.index >= li.totalItemsCount - 2)
+    }
+  }
+  var stick by remember { mutableStateOf(true) }
+  var hasNew by remember { mutableStateOf(false) }
+  LaunchedEffect(listState) {
+    snapshotFlow { listState.isScrollInProgress }.filter { !it }.collect {
+      stick = nearBottom
+      if (stick) hasNew = false
+    }
+  }
+  val itemCount = msgs.size + if (partial.isNotEmpty()) 1 else 0
   LaunchedEffect(msgs.size, partial.length / 200) {
-    val n = msgs.size + if (partial.isNotEmpty()) 1 else 0
-    if (n > 0) listState.scrollToItem(n - 1)
+    if (itemCount > 0) {
+      if (stick) listState.scrollToItem(itemCount - 1) else hasNew = true
+    }
   }
 
   Scaffold(
@@ -131,11 +158,26 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
         }
       }
       ModelBar(session?.model, session?.effort, !running, vm::setModel, vm::setEffort)
-      LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState,
-        verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
-        items(msgs, key = { it.id }) { Bubble(it) }
-        if (partial.isNotEmpty()) item(key = "partial") { Markdown(content = partial, modifier = Modifier.fillMaxWidth()) }
+      Box(Modifier.weight(1f).fillMaxWidth()) {
+        LazyColumn(Modifier.fillMaxSize(), state = listState,
+          verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
+          items(msgs, key = { it.id }) { Bubble(it) }
+          if (partial.isNotEmpty()) item(key = "partial") { Markdown(content = partial, modifier = Modifier.fillMaxWidth()) }
+        }
+        if (!stick && hasNew) {
+          FilledTonalButton(
+            onClick = {
+              uiScope.launch {
+                stick = true; hasNew = false
+                if (itemCount > 0) listState.animateScrollToItem(itemCount - 1)
+              }
+            },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+          ) { Text("↓ 새 메시지") }
+        }
       }
+      status?.let { Text(it, Modifier.padding(horizontal = 12.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.primary) }
       if (pending.isNotEmpty() || uploading > 0) {
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -148,13 +190,13 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
       }
       Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
         Box {
-          IconButton(enabled = !running, onClick = { attachMenu = true }) { Icon(Icons.Filled.AttachFile, "첨부") }
+          IconButton(onClick = { attachMenu = true }) { Icon(Icons.Filled.AttachFile, "첨부") }
           DropdownMenu(attachMenu, { attachMenu = false }) {
             DropdownMenuItem(text = { Text("파일 선택") }, onClick = { attachMenu = false; picker.launch(arrayOf("*/*")) })
             DropdownMenuItem(text = { Text("[클립보드 이미지 붙여넣기]") }, onClick = { attachMenu = false; pasteClipboardImage(ctx, vm) })
           }
         }
-        OutlinedTextField(input, { input = it }, Modifier.weight(1f), maxLines = 6, enabled = !running,
+        OutlinedTextField(input, { input = it }, Modifier.weight(1f), maxLines = 6,
           placeholder = { Text("메시지") })
         IconButton(enabled = !running && uploading == 0 && (input.isNotBlank() || pending.isNotEmpty()), onClick = { vm.send(input); input = "" }) {
           Icon(Icons.AutoMirrored.Filled.Send, "전송")
@@ -200,6 +242,8 @@ private fun Bubble(m: MessageEntity) {
       SelectionContainer { Markdown(content = m.text, modifier = Modifier.fillMaxWidth()) }
       IconButton(onClick = copy, modifier = Modifier.size(28.dp)) { Icon(Icons.Filled.ContentCopy, "복사", Modifier.size(16.dp)) }
     }
+    "info" -> Text("ℹ " + m.text, Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+      style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     "error" -> Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.errorContainer,
       modifier = Modifier.combinedClickable(onClick = {}, onLongClick = copy)) {
       Text(m.text, Modifier.fillMaxWidth().padding(10.dp), color = MaterialTheme.colorScheme.onErrorContainer)
@@ -212,9 +256,11 @@ private fun Bubble(m: MessageEntity) {
         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { open = !open }, onLongClick = copy)) {
         SelectionContainer {
           Text(
-            (when (m.role) { "tool" -> "🔧 "; "tool_error" -> "⚠ "; else -> "↳ " }) + m.text,
+            (when (m.role) { "tool" -> "🔧 "; "tool_error" -> "⚠ "; else -> "↳ " }) +
+              // tool rows: first line = summary, rest = (truncated) input JSON shown only when expanded
+              (if (m.role == "tool" && !open) m.text.substringBefore('\n') else m.text),
             Modifier.padding(8.dp), color = if (isErr) MaterialTheme.colorScheme.onErrorContainer else Color.Unspecified, fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall, maxLines = if (open) Int.MAX_VALUE else 2)
+            style = MaterialTheme.typography.bodySmall, maxLines = if (open) Int.MAX_VALUE else if (m.role == "tool") 1 else 2)
         }
       }
     }
@@ -257,11 +303,25 @@ private fun ModelBar(model: String?, effort: String?, enabled: Boolean,
   }
   if (custom) {
     var txt by remember { mutableStateOf(model ?: "") }
+    var modelErr by remember { mutableStateOf<String?>(null) }
     androidx.compose.material3.AlertDialog(
       onDismissRequest = { custom = false },
       title = { Text("모델 ID") },
-      text = { OutlinedTextField(txt, { txt = it }, singleLine = true, placeholder = { Text("claude-opus-5-5") }) },
-      confirmButton = { androidx.compose.material3.TextButton(onClick = { onModel(txt); custom = false }) { Text("확인") } },
+      text = {
+        OutlinedTextField(txt, { txt = it; modelErr = null }, singleLine = true, isError = modelErr != null,
+          placeholder = { Text("claude-opus-5-5") },
+          supportingText = { modelErr?.let { Text(it) } })
+      },
+      confirmButton = {
+        androidx.compose.material3.TextButton(onClick = {
+          val t = txt.trim()
+          when {
+            t.isEmpty() -> { onModel(null); custom = false }
+            ChatLogic.isValidModel(t) -> { onModel(t); custom = false }
+            else -> modelErr = "영문/숫자/. _ - [ ] 만, 최대 64자"
+          }
+        }) { Text("확인") }
+      },
       dismissButton = { androidx.compose.material3.TextButton(onClick = { custom = false }) { Text("취소") } })
   }
 }

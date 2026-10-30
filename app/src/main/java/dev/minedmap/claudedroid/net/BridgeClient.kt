@@ -1,6 +1,8 @@
 package dev.minedmap.claudedroid.net
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
@@ -22,6 +24,16 @@ import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 data class FileStat(val exists: Boolean, val size: Long, val isDir: Boolean)
+/** One SSE message: [id] = bridge event index (-1 if absent), [events] = parsed UiEvents. */
+data class SseMsg(val id: Int, val events: List<UiEvent>)
+data class RunInfo(val reqId: String, val done: Boolean, val events: Int)
+/** Non-2xx answer from the bridge; message already contains the bridge's {error} text. */
+class BridgeHttpException(val code: Int, message: String) : IOException(message)
+sealed interface ConnTest {
+  object Ok : ConnTest
+  object BadToken : ConnTest
+  data class Error(val message: String) : ConnTest
+}
 
 /** Lightweight handle; every instance shares ONE OkHttpClient (connection + thread pool). */
 class BridgeClient(private val base: String, private val token: String) {
@@ -50,22 +62,64 @@ class BridgeClient(private val base: String, private val token: String) {
     }.getOrNull()
   }
 
+  /** POST /chat. Each SSE event carries `id: N`; the run keeps going on the bridge if we disconnect. */
   fun chat(prompt: String, sessionId: String?, cwd: String, reqId: String, skipPerms: Boolean,
-           model: String? = null, effort: String? = null): Flow<UiEvent> = callbackFlow {
+           model: String? = null, effort: String? = null): Flow<SseMsg> {
     val body = JSONObject().put("prompt", prompt).put("sessionId", sessionId ?: JSONObject.NULL)
       .put("cwd", cwd).put("reqId", reqId).put("skipPerms", skipPerms)
       .put("model", model ?: JSONObject.NULL).put("effort", effort ?: JSONObject.NULL).toString().toRequestBody(json)
-    val req = Request.Builder().url("$base/chat").header("X-Token", token).post(body).build()
+    return sse(Request.Builder().url("$base/chat").header("X-Token", token).post(body).build())
+  }
+
+  /** GET /chat/<reqId>?from=N : replay of events with index >= from, then live until done. */
+  fun resume(reqId: String, from: Int): Flow<SseMsg> {
+    val url = "$base/chat".toHttpUrl().newBuilder().addPathSegment(reqId).addQueryParameter("from", from.toString()).build()
+    return sse(Request.Builder().url(url).header("X-Token", token).get().build())
+  }
+
+  private fun sse(req: Request): Flow<SseMsg> = callbackFlow {
     val src = EventSources.createFactory(http).newEventSource(req, object : EventSourceListener() {
       override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
-        StreamParser.parse(data).forEach { trySend(it) }
+        trySend(SseMsg(id?.toIntOrNull() ?: -1, StreamParser.parse(data)))
       }
       override fun onClosed(eventSource: EventSource) { close() }
       override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-        close(t ?: IllegalStateException("HTTP ${response?.code}"))
+        if (response != null && !response.isSuccessful) {
+          val text = try { response.body?.string() } catch (_: Exception) { null }
+          close(BridgeHttpException(response.code, ChatLogic.errorMessage(text, response.code)))
+        } else close(t ?: IOException("연결 실패"))
       }
     })
     awaitClose { src.cancel() }
+  }.buffer(Channel.UNLIMITED)
+
+  /** GET /runs; null when the bridge is unreachable or answers non-2xx. */
+  suspend fun runs(): List<RunInfo>? = withContext(Dispatchers.IO) {
+    runCatching {
+      http.newCall(Request.Builder().url("$base/runs").header("X-Token", token).build()).execute().use { r ->
+        if (!r.isSuccessful) return@use null
+        val a = JSONObject(r.body!!.string()).optJSONArray("runs") ?: return@use emptyList<RunInfo>()
+        (0 until a.length()).mapNotNull { i ->
+          val o = a.optJSONObject(i) ?: return@mapNotNull null
+          RunInfo(o.optString("reqId"), o.optBoolean("done", false), o.optInt("events", 0))
+        }
+      }
+    }.getOrNull()
+  }
+
+  /** GET /health with a human-readable verdict (Settings "연결 테스트"). */
+  suspend fun testConnection(): ConnTest = withContext(Dispatchers.IO) {
+    try {
+      http.newCall(Request.Builder().url("$base/health").header("X-Token", token).build()).execute().use { r ->
+        when {
+          r.isSuccessful -> ConnTest.Ok
+          r.code == 401 -> ConnTest.BadToken
+          else -> ConnTest.Error(ChatLogic.errorMessage(r.body?.string(), r.code))
+        }
+      }
+    } catch (e: Exception) {
+      ConnTest.Error(e.message ?: e.javaClass.simpleName)
+    }
   }
 
   suspend fun cancel(reqId: String) = withContext(Dispatchers.IO) {

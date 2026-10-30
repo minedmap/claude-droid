@@ -98,7 +98,7 @@ fun ConnectScreen(onBack: () -> Unit) {
       } catch (e: Throwable) {
         info = "상태 확인 오류: ${e.message}"
       }
-      delay(1000)
+      delay(4000)
     }
   }
 

@@ -116,15 +116,17 @@ fun FileCard(path: String) {
   val scope = rememberCoroutineScope()
   val name = path.substringAfterLast('/')
   val ext = name.substringAfterLast('.', "").lowercase()
-  var stat by remember(path) { mutableStateOf<FileStat?>(null) }
+  var stat by remember(path) { mutableStateOf<FileStat?>(FileCache.freshStat(path)) }
   var bitmap by remember(path) { mutableStateOf<Bitmap?>(null) }
   var text by remember(path) { mutableStateOf<String?>(null) }
   var expanded by remember(path) { mutableStateOf(false) }
   var zoom by remember(path) { mutableStateOf(false) }
   var pendingBytes by remember { mutableStateOf<ByteArray?>(null) }
   var err by remember(path) { mutableStateOf<String?>(null) }
-  var cached by remember(path) { mutableStateOf<ByteArray?>(null) }
-  suspend fun bytes(): ByteArray = cached ?: client.fetch(path).also { cached = it }
+  suspend fun bytes(): ByteArray {
+    val k = FileCache.key(path, stat?.size ?: -1L)
+    return FileCache.bytes.get(k) ?: client.fetch(path).also { FileCache.bytes.put(k, it) }
+  }
 
   val createDoc = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
     val b = pendingBytes
@@ -136,22 +138,27 @@ fun FileCard(path: String) {
   }
 
   LaunchedEffect(path) {
-    val st = client.stat(path)
+    val st = FileCache.freshStat(path) ?: client.stat(path)?.also { FileCache.putStat(path, it) }
     stat = st
     if (st == null) err = "브리지 응답 없음 또는 접근 불가 경로"
     if (st != null && st.exists && !st.isDir) try {
+      val ck = FileCache.key(path, st.size)
       when {
         ext in IMG_EXT && st.size <= MAX_IMG -> {
-          val b = bytes()
-          bitmap = withContext(Dispatchers.Default) { decodeScaled(b) } ?: throw IllegalStateException("이미지 디코딩 실패")
+          bitmap = FileCache.bitmaps.get(ck)
+            ?: (withContext(Dispatchers.Default) { decodeScaled(bytes()) } ?: throw IllegalStateException("이미지 디코딩 실패"))
+              .also { FileCache.bitmaps.put(ck, it) }
         }
         ext == "pdf" && st.size <= MAX_IMG -> {
-          val b = bytes()
-          bitmap = withContext(Dispatchers.IO) { renderPdfPage(ctx, path, b) } ?: throw IllegalStateException("PDF 렌더 실패")
+          bitmap = FileCache.bitmaps.get(ck)
+            ?: (withContext(Dispatchers.IO) { renderPdfPage(ctx, path, bytes()) } ?: throw IllegalStateException("PDF 렌더 실패"))
+              .also { FileCache.bitmaps.put(ck, it) }
         }
         (ext == "md" || ext == "json" || ext in TEXT_EXT) && st.size <= MAX_TEXT -> {
-          val raw = String(bytes(), Charsets.UTF_8)
-          text = if (ext == "json") prettyJson(raw) else raw
+          text = FileCache.texts.get(ck) ?: run {
+            val raw = String(bytes(), Charsets.UTF_8)
+            (if (ext == "json") prettyJson(raw) else raw).also { FileCache.texts.put(ck, it) }
+          }
         }
       }
     } catch (e: kotlinx.coroutines.CancellationException) { throw e
@@ -290,7 +297,9 @@ fun LocalImageCard(localPath: String) {
   var err by remember(localPath) { mutableStateOf<String?>(null) }
   var zoom by remember(localPath) { mutableStateOf(false) }
   LaunchedEffect(localPath) {
-    val b = withContext(Dispatchers.IO) { runCatching { decodeScaled(File(localPath).readBytes()) }.getOrNull() }
+    val ck = FileCache.key("local:$localPath", File(localPath).length())
+    val b = FileCache.bitmaps.get(ck)
+      ?: withContext(Dispatchers.IO) { runCatching { decodeScaled(File(localPath).readBytes()) }.getOrNull() }?.also { FileCache.bitmaps.put(ck, it) }
     if (b == null) err = "이미지를 열 수 없음" else bitmap = b
   }
   fun toast(m: String) = Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show()

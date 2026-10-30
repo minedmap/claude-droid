@@ -6,7 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-const running = new Map(); // reqId -> child
+const runsById = new Map(); // reqId -> run
+const MAX_RUN_BYTES = 20 * 1024 * 1024;
+const KEEP_MS = 15 * 60 * 1000;
+const MAX_JSON = 10 * 1024 * 1024;
 
 function tmpDir() {
   if (process.env.TMPDIR) return process.env.TMPDIR;
@@ -18,13 +21,13 @@ function tmpDir() {
 export function createBridge({ token, claudeBin = 'claude', adbBin = process.env.ADB_BIN || 'adb' }) {
   return http.createServer((req, res) => {
     handle(req, res).catch(e => {
-      if (!res.headersSent) res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: String(e.message || e) }));
+      if (!res.headersSent) res.writeHead(e.status || 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: String(e.message || e) }));
       else res.end();
     });
   });
 
   async function handle(req, res) {
-    if (req.headers['x-token'] !== token) { res.writeHead(401).end(); return; }
+    if (req.headers['x-token'] !== token) { return json(res, 401, { error: 'unauthorized' }); }
     const url = new URL(req.url, 'http://x');
     if (req.method === 'POST' && url.pathname === '/upload') return upload(req, res, url);
     if (req.method === 'GET' && url.pathname === '/file') return serveFile(res, url, false);
@@ -39,43 +42,88 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ connected, devices }));
       return;
     }
-    if (req.method === 'GET' && req.url === '/health') {
+    if (req.method === 'GET' && url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}'); return;
     }
-    if (req.method === 'POST' && req.url === '/cancel') {
+    if (req.method === 'GET' && url.pathname === '/runs') {
+      const runs = [...runsById.values()].map(r => ({ reqId: r.reqId, startedAt: r.startedAt, done: r.done, code: r.code, events: r.next }));
+      return json(res, 200, { runs });
+    }
+    if (req.method === 'POST' && url.pathname === '/cancel') {
       const { reqId } = await readJson(req);
-      { const c = running.get(reqId); if (c) killGroup(c); }
+      { const r = runsById.get(reqId); if (r && !r.done) killGroup(r.child); }
       res.writeHead(200).end(); return;
     }
-    if (req.method === 'POST' && req.url === '/chat') {
-      const { prompt, sessionId, cwd, reqId = String(Date.now()), skipPerms = true, model, effort } = await readJson(req);
-      if (typeof prompt !== 'string' || !prompt) throw new Error('prompt required');
-      const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
-      if (sessionId) args.push('--resume', sessionId);
-      if (typeof model === 'string' && /^[A-Za-z0-9._\-\[\]]{1,64}$/.test(model)) args.push('--model', model);
-      if (EFFORTS.includes(effort)) args.push('--effort', effort);
-      if (skipPerms) args.push('--dangerously-skip-permissions');
-      const { dir, guestCwd } = chatCwd(cwd, claudeBin);
-      const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir(), ...(guestCwd ? { CLAUDE_DROID_CWD: guestCwd } : {}) }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
-      running.set(reqId, child);
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
-      const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-      createInterface({ input: child.stdout }).on('line', l => {
-        try { send(JSON.parse(l)); } catch { send({ type: 'raw', text: l }); }
-      });
-      let err = '';
-      child.stderr.on('data', d => { err += d; });
-      child.on('error', e => { err += String(e); });
-      child.on('close', code => {
-        running.delete(reqId);
-        send({ type: 'done', code: code ?? -1, stderr: err.slice(-2000) });
-        res.end();
-      });
-      res.on('close', () => { if (!res.writableEnded) killGroup(child); });
+    if (req.method === 'GET' && url.pathname.startsWith('/chat/')) {
+      let id; try { id = decodeURIComponent(url.pathname.slice(6)); } catch { id = ''; }
+      const run = runsById.get(id);
+      if (!run) return json(res, 404, { error: 'unknown reqId' });
+      const from = Math.max(0, parseInt(url.searchParams.get('from') || '0', 10) || 0);
+      sseHead(res);
+      for (const e of run.events) if (e.idx >= from) res.write(`id: ${e.idx}\ndata: ${e.str}\n\n`);
+      if (run.done) { res.end(); return; }
+      run.subs.add(res);
+      res.on('close', () => run.subs.delete(res));
       return;
     }
-    res.writeHead(404).end();
+    if (req.method === 'POST' && url.pathname === '/chat') {
+      const { prompt, sessionId, cwd, reqId = String(Date.now()), skipPerms = true, model, effort } = await readJson(req);
+      if (typeof prompt !== 'string' || !prompt) return json(res, 400, { error: 'prompt required' });
+      const hasModel = model != null && model !== '';
+      if (hasModel && !(typeof model === 'string' && /^[A-Za-z0-9._\-\[\]]{1,64}$/.test(model))) return json(res, 400, { error: 'invalid model' });
+      const hasEffort = effort != null && effort !== '';
+      if (hasEffort && !EFFORTS.includes(effort)) return json(res, 400, { error: 'invalid effort' });
+      const old = runsById.get(reqId);
+      if (old && !old.done) return json(res, 409, { error: 'reqId in use' });
+      const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
+      if (sessionId) args.push('--resume', sessionId);
+      if (hasModel) args.push('--model', model);
+      if (hasEffort) args.push('--effort', effort);
+      if (skipPerms) args.push('--dangerously-skip-permissions');
+      const { dir, guestCwd } = chatCwd(cwd, claudeBin);
+      const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir(), ...(guestCwd ? { CLAUDE_DROID_CWD: guestCwd } : {}) }, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+      child.stdin.on('error', () => {});
+      child.stdin.end(prompt);
+      const run = { reqId: String(reqId), startedAt: Date.now(), done: false, code: null, events: [], bytes: 0, next: 0, subs: new Set(), child };
+      if (old) clearTimeout(old.timer);
+      runsById.set(run.reqId, run);
+      sseHead(res);
+      run.subs.add(res);
+      res.on('close', () => run.subs.delete(res)); // disconnect never kills claude; only /cancel does
+      const emit = obj => {
+        const str = JSON.stringify(obj), idx = run.next++;
+        run.events.push({ idx, str, size: str.length });
+        run.bytes += str.length;
+        while (run.bytes > MAX_RUN_BYTES && run.events.length > 1) run.bytes -= run.events.shift().size;
+        for (const s of run.subs) s.write(`id: ${idx}\ndata: ${str}\n\n`);
+      };
+      let err = '', pending = 2;
+      const finish = code => {
+        const stderr = err.split('\n').filter(l => !/^proot (warning|info):/.test(l)).join('\n');
+        emit({ type: 'done', code, stderr: stderr.slice(-2000) });
+        run.done = true; run.code = code;
+        for (const s of run.subs) s.end();
+        run.subs.clear();
+        run.timer = setTimeout(() => { if (runsById.get(run.reqId) === run) runsById.delete(run.reqId); }, KEEP_MS);
+        run.timer.unref();
+      };
+      let exitCode = -1;
+      const part = () => { if (--pending === 0) finish(exitCode); };
+      const rl = createInterface({ input: child.stdout });
+      rl.on('line', l => { try { emit(JSON.parse(l)); } catch { emit({ type: 'raw', text: l }); } });
+      rl.on('close', part);
+      child.stderr.on('data', d => { err += d; });
+      child.on('error', e => { err += String(e); if (child.pid === undefined) { exitCode = -1; pending = 1; part(); } });
+      child.on('close', code => { exitCode = code ?? -1; part(); });
+      return;
+    }
+    json(res, 404, { error: 'not found' });
   }
+}
+
+function sseHead(res) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+  res.flushHeaders?.();
 }
 
 // proot cwd (e.g. /root/proj): run in its host path and tell the wrapper the guest path via CLAUDE_DROID_CWD.
@@ -99,8 +147,8 @@ const TYPES = {
 const json = (res, code, obj) => res.writeHead(code, { 'Content-Type': 'application/json' }).end(JSON.stringify(obj));
 
 export function sanitizeName(raw) {
-  const base = path.basename(String(raw || '').replace(/\\/g, '/')).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
-  return base && /[A-Za-z0-9]/.test(base) ? base.slice(0, 100) : 'upload.bin';
+  const base = path.basename(String(raw || '').replace(/\\/g, '/')).replace(/[^\p{L}\p{N} ._()\-]/gu, '_').replace(/^\.+/, '').trim();
+  return base && /[\p{L}\p{N}]/u.test(base) ? [...base].slice(0, 100).join('') : 'upload.bin';
 }
 
 function uniquePath(dir, name) {
@@ -114,24 +162,34 @@ function uniquePath(dir, name) {
 async function upload(req, res, url) {
   const cwd = url.searchParams.get('cwd');
   const hostCwd = cwd && path.isAbsolute(cwd) ? toHost(path.resolve(cwd)) : null;
-  const base = hostCwd && fs.existsSync(hostCwd) ? hostCwd : os.homedir();
+  const found = hostCwd && fs.existsSync(hostCwd);
+  const base = found ? hostCwd : os.homedir();
   const dir = path.join(base, '.claude-droid', 'uploads');
   fs.mkdirSync(dir, { recursive: true });
   const target = uniquePath(dir, sanitizeName(url.searchParams.get('name')));
   const out = fs.createWriteStream(target);
-  let n = 0, over = false;
-  await new Promise((ok, bad) => {
-    req.on('data', c => {
-      n += c.length;
-      if (n > MAX_BYTES) { over = true; return; }
-      if (!over) out.write(c);
+  let n = 0, over = false, ended = false;
+  try {
+    await new Promise((ok, bad) => {
+      req.on('data', c => {
+        n += c.length;
+        if (n > MAX_BYTES) { over = true; return; }
+        if (!over) out.write(c);
+      });
+      req.on('end', () => { ended = true; out.end(ok); });
+      req.on('aborted', () => bad(new Error('aborted')));
+      req.on('close', () => { if (!ended) bad(new Error('aborted')); });
+      req.on('error', bad);
+      out.on('error', bad);
     });
-    req.on('end', () => out.end(ok));
-    req.on('error', bad);
-    out.on('error', bad);
-  });
+  } catch (e) {
+    out.destroy();
+    fs.rmSync(target, { force: true });
+    if (!res.headersSent && !res.destroyed) json(res, 400, { error: String(e.message || e) });
+    return;
+  }
   if (over) { fs.rmSync(target, { force: true }); return json(res, 413, { error: 'too large' }); }
-  json(res, 200, { path: toGuest(target) });
+  json(res, 200, cwd && !found ? { path: toGuest(target), warning: 'cwd not found, saved to home' } : { path: toGuest(target) });
 }
 
 const PREFIX = () => process.env.PREFIX || '/data/data/com.termux/files/usr';
@@ -159,6 +217,15 @@ export function toGuest(p) {
   return p.startsWith(rootfs + '/') ? p.slice(rootfs.length) : p;
 }
 
+const DENY_NAMES = new Set(['.credentials.json', '.claude-droid-token', '.env', '.git-credentials', '.netrc', 'adbkey', 'adbkey.pub']);
+function denied(x) {
+  const segs = x.split(/[\\/]/);
+  const b = segs[segs.length - 1].toLowerCase();
+  if (DENY_NAMES.has(b) && (b !== 'adbkey' && b !== 'adbkey.pub' || segs.includes('.android'))) return true;
+  if (b.endsWith('.pem') || b.endsWith('.key')) return true;
+  return segs.slice(0, -1).includes('.ssh') || segs.includes('.ssh');
+}
+
 function resolveAllowed(p) {
   if (!p || !path.isAbsolute(p)) return { code: 400 };
   const abs = toHost(path.resolve(p));
@@ -169,6 +236,7 @@ function resolveAllowed(p) {
   const under = (x, r) => { let rr = r; try { rr = fs.realpathSync(r); } catch {} return x === rr || x.startsWith(rr + path.sep); };
   // check the lexical path too so missing files outside roots are 403, not 404
   const probe = real ?? abs;
+  if (denied(abs) || denied(probe)) return { code: 403 };
   if (!roots.some(r => under(probe, r))) return { code: 403 };
   return { code: 0, real };
 }
@@ -192,8 +260,15 @@ function killGroup(child, sig = 'SIGINT') {
 
 function readJson(req) {
   return new Promise((ok, bad) => {
-    let b = ''; req.on('data', c => { b += c; });
-    req.on('end', () => { try { ok(JSON.parse(b || '{}')); } catch (e) { bad(e); } });
+    let b = '', n = 0, dead = false;
+    req.on('data', c => {
+      if (dead) return;
+      n += c.length;
+      if (n > MAX_JSON) { dead = true; b = ''; bad(Object.assign(new Error('body too large'), { status: 413 })); return; }
+      b += c;
+    });
+    req.on('end', () => { if (dead) return; try { ok(JSON.parse(b || '{}')); } catch (e) { bad(e); } });
+    req.on('error', bad);
   });
 }
 

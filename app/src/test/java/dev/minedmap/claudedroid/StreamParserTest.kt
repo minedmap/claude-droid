@@ -20,6 +20,14 @@ class StreamParserTest {
     StreamParser.parse("""{"type":"stream_event","event":{"type":"message_start"}}"""))
   @Test fun cost() = assertEquals(listOf(UiEvent.Result("ok", 0.0123)),
     StreamParser.parse("""{"type":"result","result":"ok","total_cost_usd":0.0123}"""))
+  @Test fun resultIsError() = assertEquals(listOf(UiEvent.Result("boom", 0.0, true)),
+    StreamParser.parse("""{"type":"result","is_error":true,"result":"boom","total_cost_usd":0}"""))
+  @Test fun resultErrorSubtypeWithoutText() = assertEquals(listOf(UiEvent.Result("error_max_turns", null, true)),
+    StreamParser.parse("""{"type":"result","subtype":"error_max_turns"}"""))
+  @Test fun resultSuccessNotError() = assertEquals(listOf(UiEvent.Result("ok", null, false)),
+    StreamParser.parse("""{"type":"result","subtype":"success","is_error":false,"result":"ok"}"""))
+  @Test fun resultNullCost() = assertEquals(listOf(UiEvent.Result("ok", null)),
+    StreamParser.parse("""{"type":"result","result":"ok","total_cost_usd":null}"""))
   @Test fun toolResultImage() = assertEquals(listOf(UiEvent.ToolResult("cap"), UiEvent.ToolImage("image/jpeg", "QUJD")),
     StreamParser.parse("""{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"cap"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"QUJD"}}]}]}}"""))
   @Test fun imageOnlyNoEmptyBubble() = assertEquals(listOf(UiEvent.ToolImage("image/png", "QQ==")),

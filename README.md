@@ -31,7 +31,15 @@ Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
 4. 앱 APK 설치 → 설정에 토큰 붙여넣기 → 연결 마법사 순서대로.
    - RUN_COMMAND 권한 허용, 무선 디버깅 페어링(알림 입력 또는 수동 포트/코드 입력).
 
-포트 변경: 서비스 run 스크립트에 `export BRIDGE_PORT=9000` 추가 후 앱 설정의 브리지 URL도 변경.
+포트 변경: `~/claude-droid/env` 파일에 `BRIDGE_PORT=9000` 작성(서비스 run 스크립트와 start.sh가 읽음, 재설치해도 유지) 후 앱 설정의 브리지 URL도 변경.
+
+### 브리지 API
+- 프롬프트는 argv가 아니라 **stdin**으로 `claude -p`에 전달(`-`로 시작/128KB 초과도 가능).
+- `POST /chat` → SSE, 각 이벤트 `id: <N>\ndata: <json>`(N=0부터). 클라이언트가 끊겨도 claude는 계속 실행, 이벤트는 런당 ~20MB까지 버퍼링하고 종료 후 15분 보관.
+- `GET /chat/<reqId>?from=N` → N번 이후 이벤트 재전송 후 실시간 이어받기. 없으면 404 `{error:'unknown reqId'}`.
+- `GET /runs` → `{runs:[{reqId,startedAt,done,code,events}]}`. `POST /cancel {reqId}`만 프로세스를 종료.
+- 잘못된 `model`/`effort` → 400 `{error:'invalid model'|'invalid effort'}`. 모든 4xx는 JSON `{error}`.
+- `/file`·`/stat`은 자격증명류(`.credentials.json`, `.ssh/`, `*.pem`, `*.key`, `.env` 등) 403.
 
 ## 파일 / 복사 (v0.5)
 
