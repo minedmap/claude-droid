@@ -26,7 +26,8 @@ Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
    ```
    cd ~ && curl -LO https://github.com/minedmap/claude-droid/releases/latest/download/bridge.zip && unzip -o bridge.zip && bash bridge/install.sh
    ```
-   마지막에 출력되는 TOKEN을 복사. (`termux-services` 첫 설치 시 Termux 완전 종료 후 재실행)
+   마지막에 출력되는 TOKEN을 복사.
+   (선택) 화면 조작 MCP [claude-in-mobile](https://github.com/AlexGladkov/claude-in-mobile) 등록: `bash bridge/mcp-setup.sh` (`termux-services` 첫 설치 시 Termux 완전 종료 후 재실행)
 4. 앱 APK 설치 → 설정에 토큰 붙여넣기 → 연결 마법사 순서대로.
    - RUN_COMMAND 권한 허용, 무선 디버깅 페어링(알림 입력 또는 수동 포트/코드 입력).
 
