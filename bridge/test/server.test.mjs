@@ -67,3 +67,100 @@ test('cancel kills whole process group fast', async () => {
 test('404 unknown route', async () => {
   assert.equal((await fetch(base + '/nope', { headers: H })).status, 404);
 });
+
+// ---- upload / file / stat ----
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cd-test-'));
+const up = (name, body, cwd = work) => fetch(`${base}/upload?cwd=${encodeURIComponent(cwd)}&name=${encodeURIComponent(name)}`, { method: 'POST', headers: { 'X-Token': 't0k' }, body });
+
+test('upload saves file under cwd/.claude-droid/uploads', async () => {
+  const r = await up('a.txt', 'hello');
+  assert.equal(r.status, 200);
+  const { path: p } = await r.json();
+  assert.equal(p, path.join(work, '.claude-droid', 'uploads', 'a.txt'));
+  assert.equal(fs.readFileSync(p, 'utf8'), 'hello');
+});
+test('upload sanitizes name and avoids collision', async () => {
+  const p1 = (await (await up('../../evil name!.sh', 'x')).json()).path;
+  assert.equal(path.dirname(p1), path.join(work, '.claude-droid', 'uploads'));
+  assert.match(path.basename(p1), /^[A-Za-z0-9._-]+$/);
+  const a = (await (await up('dup.txt', '1')).json()).path;
+  const b = (await (await up('dup.txt', '2')).json()).path;
+  assert.equal(path.basename(a), 'dup.txt');
+  assert.equal(path.basename(b), 'dup-1.txt');
+  assert.equal(fs.readFileSync(a, 'utf8'), '1');
+});
+test('upload empty/odd name falls back to upload.bin', async () => {
+  const p = (await (await up('///', 'x')).json()).path;
+  assert.equal(path.basename(p), 'upload.bin');
+});
+test('upload without cwd goes to HOME', async () => {
+  const r = await fetch(`${base}/upload?name=home-${process.pid}.txt`, { method: 'POST', headers: { 'X-Token': 't0k' }, body: 'h' });
+  const { path: p } = await r.json();
+  assert.ok(p.startsWith(path.join(os.homedir(), '.claude-droid', 'uploads')));
+  fs.rmSync(p);
+});
+test('upload > 50MB -> 413', async () => {
+  const r = await up('big.bin', Buffer.alloc(50 * 1024 * 1024 + 1)).catch(e => ({ status: 413 }));
+  assert.equal(r.status, 413);
+});
+test('upload needs token', async () => {
+  const r = await fetch(`${base}/upload?name=a`, { method: 'POST', body: 'x' });
+  assert.equal(r.status, 401);
+});
+
+const getF = (p, ep = 'file') => fetch(`${base}/${ep}?path=${encodeURIComponent(p)}`, { headers: H });
+test('file serves content with type and length', async () => {
+  const f = path.join(work, 'x.png'); fs.writeFileSync(f, Buffer.from([1, 2, 3, 4]));
+  const r = await getF(f);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'image/png');
+  assert.equal(r.headers.get('content-length'), '4');
+  assert.deepEqual([...new Uint8Array(await r.arrayBuffer())], [1, 2, 3, 4]);
+});
+test('file content types by extension', async () => {
+  const want = { 'a.md': 'text/markdown', 'a.json': 'application/json', 'a.txt': 'text/plain', 'a.csv': 'text/csv', 'a.pdf': 'application/pdf', 'a.svg': 'image/svg+xml', 'a.jpg': 'image/jpeg', 'a.webp': 'image/webp', 'a.zzz': 'application/octet-stream' };
+  for (const [n, t] of Object.entries(want)) {
+    const f = path.join(work, n); fs.writeFileSync(f, 'x');
+    const r = await getF(f); await r.arrayBuffer();
+    assert.match(r.headers.get('content-type'), new RegExp('^' + t.replace(/[+/]/g, '\\$&')), n);
+  }
+});
+test('file 404 missing', async () => {
+  assert.equal((await getF(path.join(work, 'nope.txt'))).status, 404);
+});
+test('file 403 outside allowed roots and traversal', async () => {
+  assert.equal((await getF('/etc/passwd')).status, 403);
+  assert.equal((await getF(path.join(work, ...Array(12).fill('..'), 'etc', 'passwd'))).status, 403);
+  const link = path.join(work, 'lnk'); try { fs.symlinkSync('/etc/passwd', link); } catch {}
+  assert.equal((await getF(link)).status, 403);
+});
+test('file relative path -> 400', async () => {
+  assert.equal((await getF('rel/x.txt')).status, 400);
+});
+test('file > 50MB -> 413', async () => {
+  const f = path.join(work, 'huge.bin'); fs.closeSync(fs.openSync(f, 'w')); fs.truncateSync(f, 50 * 1024 * 1024 + 1);
+  assert.equal((await getF(f)).status, 413);
+  fs.rmSync(f);
+});
+test('stat reports exists/size/isDir', async () => {
+  const f = path.join(work, 's.txt'); fs.writeFileSync(f, 'abc');
+  assert.deepEqual(await (await getF(f, 'stat')).json(), { exists: true, size: 3, isDir: false });
+  assert.deepEqual(await (await getF(work, 'stat')).json(), { exists: true, size: fs.statSync(work).size, isDir: true });
+  assert.deepEqual(await (await getF(path.join(work, 'none'), 'stat')).json(), { exists: false, size: 0, isDir: false });
+  assert.equal((await getF('/etc/passwd', 'stat')).status, 403);
+});
+test('/root/ maps to UBUNTU_ROOTFS', async () => {
+  const rootfs = path.join(work, 'rootfs'); fs.mkdirSync(path.join(rootfs, 'root'), { recursive: true });
+  fs.writeFileSync(path.join(rootfs, 'root', 'r.md'), '# hi');
+  process.env.UBUNTU_ROOTFS = rootfs;
+  try {
+    const r = await getF('/root/r.md');
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), '# hi');
+    assert.equal((await getF('/root/../../etc/passwd')).status, 403);
+  } finally { delete process.env.UBUNTU_ROOTFS; }
+});
+after(() => fs.rmSync(work, { recursive: true, force: true }));

@@ -25,6 +25,10 @@ export function createBridge({ token, claudeBin = 'claude' }) {
 
   async function handle(req, res) {
     if (req.headers['x-token'] !== token) { res.writeHead(401).end(); return; }
+    const url = new URL(req.url, 'http://x');
+    if (req.method === 'POST' && url.pathname === '/upload') return upload(req, res, url);
+    if (req.method === 'GET' && url.pathname === '/file') return serveFile(res, url, false);
+    if (req.method === 'GET' && url.pathname === '/stat') return serveFile(res, url, true);
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}'); return;
     }
@@ -62,6 +66,76 @@ export function createBridge({ token, claudeBin = 'claude' }) {
     }
     res.writeHead(404).end();
   }
+}
+
+const MAX_BYTES = 50 * 1024 * 1024;
+const TYPES = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+  md: 'text/markdown; charset=utf-8', json: 'application/json', txt: 'text/plain; charset=utf-8', csv: 'text/csv; charset=utf-8',
+  log: 'text/plain; charset=utf-8', html: 'text/html; charset=utf-8', pdf: 'application/pdf',
+};
+const json = (res, code, obj) => res.writeHead(code, { 'Content-Type': 'application/json' }).end(JSON.stringify(obj));
+
+export function sanitizeName(raw) {
+  const base = path.basename(String(raw || '').replace(/\\/g, '/')).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+  return base && /[A-Za-z0-9]/.test(base) ? base.slice(0, 100) : 'upload.bin';
+}
+
+function uniquePath(dir, name) {
+  const ext = path.extname(name), stem = name.slice(0, name.length - ext.length);
+  for (let i = 0; ; i++) {
+    const p = path.join(dir, i === 0 ? name : `${stem}-${i}${ext}`);
+    try { fs.writeFileSync(p, '', { flag: 'wx' }); return p; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
+}
+
+async function upload(req, res, url) {
+  const cwd = url.searchParams.get('cwd');
+  const base = cwd && path.isAbsolute(cwd) && fs.existsSync(cwd) ? cwd : os.homedir();
+  const dir = path.join(base, '.claude-droid', 'uploads');
+  fs.mkdirSync(dir, { recursive: true });
+  const target = uniquePath(dir, sanitizeName(url.searchParams.get('name')));
+  const out = fs.createWriteStream(target);
+  let n = 0, over = false;
+  await new Promise((ok, bad) => {
+    req.on('data', c => {
+      n += c.length;
+      if (n > MAX_BYTES) { over = true; return; }
+      if (!over) out.write(c);
+    });
+    req.on('end', () => out.end(ok));
+    req.on('error', bad);
+    out.on('error', bad);
+  });
+  if (over) { fs.rmSync(target, { force: true }); return json(res, 413, { error: 'too large' }); }
+  json(res, 200, { path: target });
+}
+
+function resolveAllowed(p) {
+  if (!p || !path.isAbsolute(p)) return { code: 400 };
+  let abs = path.resolve(p);
+  const rootfs = process.env.UBUNTU_ROOTFS || path.join(process.env.PREFIX || '/data/data/com.termux/files/usr', 'var/lib/proot-distro/installed-rootfs/ubuntu');
+  if (abs.startsWith('/root/') && fs.existsSync(path.join(rootfs, 'root'))) abs = path.join(rootfs, abs);
+  let real;
+  try { real = fs.realpathSync(abs); } catch { real = null; }
+  const roots = [os.homedir(), rootfs, '/sdcard', '/storage/emulated/0', os.tmpdir()];
+  const under = (x, r) => { let rr = r; try { rr = fs.realpathSync(r); } catch {} return x === rr || x.startsWith(rr + path.sep); };
+  // check the lexical path too so missing files outside roots are 403, not 404
+  const probe = real ?? abs;
+  if (!roots.some(r => under(probe, r))) return { code: 403 };
+  return { code: 0, real };
+}
+
+function serveFile(res, url, statOnly) {
+  const r = resolveAllowed(url.searchParams.get('path'));
+  if (r.code) return json(res, r.code, { error: r.code === 403 ? 'forbidden' : 'absolute path required' });
+  const st = r.real ? fs.statSync(r.real) : null;
+  if (statOnly) return json(res, 200, st ? { exists: true, size: st.size, isDir: st.isDirectory() } : { exists: false, size: 0, isDir: false });
+  if (!st || st.isDirectory()) return json(res, 404, { error: 'not found' });
+  if (st.size > MAX_BYTES) return json(res, 413, { error: 'too large' });
+  const ext = path.extname(r.real).slice(1).toLowerCase();
+  res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', 'Content-Length': st.size });
+  fs.createReadStream(r.real).on('error', () => res.destroy()).pipe(res);
 }
 
 function killGroup(child, sig = 'SIGINT') {

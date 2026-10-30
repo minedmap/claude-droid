@@ -18,6 +18,11 @@
     </activity>
     <receiver android:name=".adb.PairingReceiver" android:exported="false"/>
     <receiver android:name=".adb.TermuxResultReceiver" android:exported="false"/>
+    <provider android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.fileprovider"
+        android:exported="false" android:grantUriPermissions="true">
+      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/>
+    </provider>
     <provider android:name="rikka.shizuku.ShizukuProvider"
         android:authorities="${applicationId}.shizuku"
         android:multiprocess="false" android:enabled="true" android:exported="true"

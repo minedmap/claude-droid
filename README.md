@@ -33,6 +33,14 @@ Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
 
 포트 변경: 서비스 run 스크립트에 `export BRIDGE_PORT=9000` 추가 후 앱 설정의 브리지 URL도 변경.
 
+## 파일 / 복사 (v0.5)
+
+- **파일 업로드**: 입력창 옆 클립 버튼 → 파일 선택(여러 개) 또는 `[클립보드 이미지 붙여넣기]`. 칩으로 표시되며 전송 시 프롬프트에 `첨부 파일:` 경로 목록이 붙습니다. 파일은 세션 cwd의 `.claude-droid/uploads/`에 저장(최대 50MB).
+- **미리보기**: Claude가 만든/언급한 파일(Write·Edit·MCP 결과·본문 경로)이 카드로 표시됩니다. 이미지 · md · json · 텍스트 미리보기, 이미지 탭 시 확대(핀치 줌).
+- **다운로드 / 공유**: 카드의 `다운로드`는 `Download/ClaudeDroid`에 저장(Android 9 이하는 저장 위치 선택), `공유`는 공유 시트.
+- **복사**: 말풍선 길게 누르면 전체 복사, 어시스턴트 메시지에 복사 버튼, 텍스트 선택 가능. (코드블록 개별 복사 버튼은 미지원)
+- 브리지 API: `POST /upload`, `GET /file?path=`, `GET /stat?path=` — HOME · Ubuntu rootfs · /sdcard · tmp 아래만 허용.
+
 ## ⚠ 보안
 - 기본값으로 `--dangerously-skip-permissions` 사용 → Claude가 **확인 없이** 명령 실행. 무선 디버깅 연결 시 폰 전체 조작 가능. 설정에서 끌 수 있음(끄면 권한이 필요한 작업에서 멈춤).
 - proot Ubuntu는 root로 실행되므로 `IS_SANDBOX=1`을 설정한다.

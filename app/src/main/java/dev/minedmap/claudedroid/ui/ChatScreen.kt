@@ -1,5 +1,22 @@
 package dev.minedmap.claudedroid.ui
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.InputChip
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -58,6 +76,14 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   val partial by vm.partial.collectAsState()
   var input by remember { mutableStateOf("") }
   val listState = rememberLazyListState()
+  val ctx = LocalContext.current
+  val pending by vm.pending.collectAsState()
+  val uploading by vm.uploading.collectAsState()
+  var attachMenu by remember { mutableStateOf(false) }
+  val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    uris.forEach { vm.attach(it) }
+  }
+  LaunchedEffect(Unit) { vm.toast.collect { Toast.makeText(ctx, it, Toast.LENGTH_SHORT).show() } }
 
   LaunchedEffect(msgs.size, partial.length / 200) {
     val n = msgs.size + if (partial.isNotEmpty()) 1 else 0
@@ -88,10 +114,27 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
         items(msgs, key = { it.id }) { Bubble(it) }
         if (partial.isNotEmpty()) item(key = "partial") { Markdown(content = partial, modifier = Modifier.fillMaxWidth()) }
       }
+      if (pending.isNotEmpty() || uploading > 0) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+          pending.forEach { a ->
+            InputChip(selected = false, onClick = { vm.removeAttachment(a) }, label = { Text(a.name, maxLines = 1) },
+              trailingIcon = { Icon(Icons.Filled.Close, "제거", Modifier.size(16.dp)) })
+          }
+          if (uploading > 0) Text("업로드 중… ($uploading)", style = MaterialTheme.typography.bodySmall)
+        }
+      }
       Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
+        Box {
+          IconButton(enabled = !running, onClick = { attachMenu = true }) { Icon(Icons.Filled.AttachFile, "첨부") }
+          DropdownMenu(attachMenu, { attachMenu = false }) {
+            DropdownMenuItem(text = { Text("파일 선택") }, onClick = { attachMenu = false; picker.launch(arrayOf("*/*")) })
+            DropdownMenuItem(text = { Text("[클립보드 이미지 붙여넣기]") }, onClick = { attachMenu = false; pasteClipboardImage(ctx, vm) })
+          }
+        }
         OutlinedTextField(input, { input = it }, Modifier.weight(1f), maxLines = 6, enabled = !running,
           placeholder = { Text("메시지") })
-        IconButton(enabled = !running && input.isNotBlank(), onClick = { vm.send(input); input = "" }) {
+        IconButton(enabled = !running && uploading == 0 && (input.isNotBlank() || pending.isNotEmpty()), onClick = { vm.send(input); input = "" }) {
           Icon(Icons.AutoMirrored.Filled.Send, "전송")
         }
       }
@@ -99,26 +142,55 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   }
 }
 
+private fun copyText(ctx: Context, text: String) {
+  val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+  cm.setPrimaryClip(ClipData.newPlainText("claude-droid", text))
+  Toast.makeText(ctx, "복사됨", Toast.LENGTH_SHORT).show()
+}
+
+private fun pasteClipboardImage(ctx: Context, vm: ChatViewModel) {
+  val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+  val clip = cm.primaryClip
+  val uri = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).uri else null
+  val mime = uri?.let { runCatching { ctx.contentResolver.getType(it) }.getOrNull() }
+  if (uri == null || mime == null || !mime.startsWith("image/")) {
+    Toast.makeText(ctx, "클립보드에 이미지 없음", Toast.LENGTH_SHORT).show(); return
+  }
+  val ext = when (val e = mime.substringAfter('/')) { "jpeg" -> "jpg"; "" -> "png"; else -> e.filter { it.isLetterOrDigit() } }
+  vm.attach(uri, "clip-${System.currentTimeMillis()}.$ext")
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Bubble(m: MessageEntity) {
+  val ctx = LocalContext.current
+  val copy = { copyText(ctx, m.text) }
   when (m.role) {
+    "file" -> FileCard(m.text)
     "user" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-      Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+      Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = Modifier.combinedClickable(onClick = {}, onLongClick = copy)) {
         Text(m.text, Modifier.padding(10.dp))
       }
     }
-    "assistant" -> Markdown(content = m.text, modifier = Modifier.fillMaxWidth())
-    "error" -> Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.errorContainer) {
+    "assistant" -> Column(Modifier.fillMaxWidth().combinedClickable(onClick = {}, onLongClick = copy)) {
+      SelectionContainer { Markdown(content = m.text, modifier = Modifier.fillMaxWidth()) }
+      IconButton(onClick = copy, modifier = Modifier.size(28.dp)) { Icon(Icons.Filled.ContentCopy, "복사", Modifier.size(16.dp)) }
+    }
+    "error" -> Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.errorContainer,
+      modifier = Modifier.combinedClickable(onClick = {}, onLongClick = copy)) {
       Text(m.text, Modifier.fillMaxWidth().padding(10.dp), color = MaterialTheme.colorScheme.onErrorContainer)
     }
     else -> {
       var open by remember { mutableStateOf(false) }
       Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().clickable { open = !open }) {
-        Text(
-          (if (m.role == "tool") "🔧 " else "↳ ") + m.text,
-          Modifier.padding(8.dp), fontFamily = FontFamily.Monospace,
-          style = MaterialTheme.typography.bodySmall, maxLines = if (open) Int.MAX_VALUE else 2)
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { open = !open }, onLongClick = copy)) {
+        SelectionContainer {
+          Text(
+            (if (m.role == "tool") "🔧 " else "↳ ") + m.text,
+            Modifier.padding(8.dp), fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodySmall, maxLines = if (open) Int.MAX_VALUE else 2)
+        }
       }
     }
   }

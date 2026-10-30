@@ -7,7 +7,7 @@ android {
   compileSdk = 34
   defaultConfig {
     applicationId = "dev.minedmap.claudedroid"
-    minSdk = 26; targetSdk = 34; versionCode = 5; versionName = "0.4"
+    minSdk = 26; targetSdk = 34; versionCode = 6; versionName = "0.5"
   }
   buildFeatures { compose = true; aidl = true }
   compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
