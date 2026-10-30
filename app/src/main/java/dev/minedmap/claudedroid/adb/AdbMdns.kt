@@ -21,57 +21,117 @@ object AdbMdns {
   private val _connectPort = MutableStateFlow<Int?>(null)
   val pairingPort: StateFlow<Int?> = _pairingPort
   val connectPort: StateFlow<Int?> = _connectPort
+  val lastError = MutableStateFlow<String?>(null)
 
   private var pairing: Watcher? = null
   private var connect: Watcher? = null
 
   @Synchronized fun start(ctx: Context) {
-    val app = ctx.applicationContext
-    if (pairing == null) pairing = Watcher(app, TLS_PAIRING) { _pairingPort.value = if (it > 0) it else null }
-    if (connect == null) connect = Watcher(app, TLS_CONNECT) { _connectPort.value = if (it > 0) it else null }
-    pairing?.start(); connect?.start()
+    try {
+      val app = ctx.applicationContext
+      if (pairing == null) pairing = Watcher(app, TLS_PAIRING) { _pairingPort.value = if (it > 0) it else null }
+      if (connect == null) connect = Watcher(app, TLS_CONNECT) { _connectPort.value = if (it > 0) it else null }
+      pairing?.start(); connect?.start()
+    } catch (e: Throwable) {
+      lastError.value = "mDNS 시작 실패: ${e.message}"
+    }
   }
 
-  @Synchronized fun stop() { pairing?.stop(); connect?.stop() }
+  @Synchronized fun stop() {
+    try { pairing?.stop(); connect?.stop() } catch (e: Throwable) { lastError.value = "mDNS 중지 실패: ${e.message}" }
+  }
 
   private class Watcher(ctx: Context, private val type: String, private val onPort: (Int) -> Unit) {
-    private val nsd: NsdManager = ctx.getSystemService(NsdManager::class.java)
+    private val nsd: NsdManager? = ctx.getSystemService(NsdManager::class.java)
+    private val lock = Any()
     private var running = false
-    private var registered = false
+    private var active = false        // discovery currently registered or starting
+    private var resolving = false
+    private val queue = ArrayDeque<NsdServiceInfo>()
     private var serviceName: String? = null
+    private var listener: NsdManager.DiscoveryListener? = null
 
-    private val listener = object : NsdManager.DiscoveryListener {
-      override fun onDiscoveryStarted(t: String) { registered = true }
-      override fun onStartDiscoveryFailed(t: String, code: Int) { Log.v(TAG, "start failed $t $code") }
-      override fun onDiscoveryStopped(t: String) { registered = false }
-      override fun onStopDiscoveryFailed(t: String, code: Int) { Log.v(TAG, "stop failed $t $code") }
-      override fun onServiceFound(info: NsdServiceInfo) {
-        @Suppress("DEPRECATION")
-        nsd.resolveService(info, object : NsdManager.ResolveListener {
-          override fun onResolveFailed(i: NsdServiceInfo, code: Int) {}
-          override fun onServiceResolved(r: NsdServiceInfo) { resolved(r) }
-        })
+    private fun newListener() = object : NsdManager.DiscoveryListener {
+      override fun onDiscoveryStarted(t: String) {}
+      override fun onStartDiscoveryFailed(t: String, code: Int) {
+        Log.v(TAG, "start failed $t $code")
+        synchronized(lock) { if (listener === this) { active = false; listener = null } }
       }
-      override fun onServiceLost(info: NsdServiceInfo) { if (info.serviceName == serviceName) onPort(-1) }
+      override fun onDiscoveryStopped(t: String) {
+        synchronized(lock) { if (listener === this) { active = false; listener = null } }
+      }
+      override fun onStopDiscoveryFailed(t: String, code: Int) {
+        Log.v(TAG, "stop failed $t $code")
+        synchronized(lock) { if (listener === this) { active = false; listener = null } }
+      }
+      override fun onServiceFound(info: NsdServiceInfo) {
+        try {
+          synchronized(lock) { queue.addLast(info) }
+          pump()
+        } catch (e: Throwable) { Log.w(TAG, "found", e) }
+      }
+      override fun onServiceLost(info: NsdServiceInfo) {
+        try { if (info.serviceName == serviceName) onPort(-1) } catch (_: Throwable) {}
+      }
+    }
+
+    private fun pump() {
+      val info: NsdServiceInfo
+      synchronized(lock) {
+        if (resolving || !running) return
+        info = queue.removeFirstOrNull() ?: return
+        resolving = true
+      }
+      try {
+        @Suppress("DEPRECATION")
+        nsd?.resolveService(info, object : NsdManager.ResolveListener {
+          override fun onResolveFailed(i: NsdServiceInfo, code: Int) { done() }
+          override fun onServiceResolved(r: NsdServiceInfo) {
+            try { resolved(r) } catch (e: Throwable) { Log.w(TAG, "resolved", e) }
+            done()
+          }
+        })
+      } catch (e: Throwable) {
+        Log.w(TAG, "resolveService", e)
+        done()
+      }
+    }
+
+    private fun done() {
+      synchronized(lock) { resolving = false }
+      try { pump() } catch (_: Throwable) {}
     }
 
     fun start() {
-      if (running) return
-      running = true
-      if (!registered) nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, listener)
+      synchronized(lock) {
+        running = true
+        if (active) return
+        active = true
+        val l = newListener()
+        listener = l
+        try {
+          nsd?.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, l)
+        } catch (e: Throwable) {
+          active = false; listener = null
+          Log.w(TAG, "discoverServices", e)
+        }
+      }
     }
 
     fun stop() {
-      if (!running) return
-      running = false
-      if (registered) nsd.stopServiceDiscovery(listener)
+      synchronized(lock) {
+        running = false
+        queue.clear()
+        val l = listener ?: return
+        try { nsd?.stopServiceDiscovery(l) } catch (e: Throwable) { active = false; listener = null }
+      }
     }
 
     private fun resolved(r: NsdServiceInfo) {
       @Suppress("DEPRECATION")
       val host = r.host?.hostAddress ?: return
-      val mine = NetworkInterface.getNetworkInterfaces().asSequence()
-        .any { ni -> ni.inetAddresses.asSequence().any { it.hostAddress == host } }
+      val mine = NetworkInterface.getNetworkInterfaces()?.asSequence()
+        ?.any { ni -> ni.inetAddresses.asSequence().any { it.hostAddress == host } } ?: false
       if (running && mine && inUse(r.port)) {
         serviceName = r.serviceName
         onPort(r.port)

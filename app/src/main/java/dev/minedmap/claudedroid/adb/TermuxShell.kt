@@ -32,6 +32,8 @@ class TermuxShell(private val ctx: Context) : PrivilegedShell {
 
   suspend fun startBridge() = run("$PREFIX/bin/sv", arrayOf("up", "$PREFIX/var/service/claude-droid"))
 
+  suspend fun runScript(script: String): Result<String> = run("$PREFIX/bin/bash", arrayOf(script))
+
   private suspend fun run(path: String, args: Array<String>): Result<String> {
     val id = counter.incrementAndGet()
     val d = CompletableDeferred<Bundle?>()

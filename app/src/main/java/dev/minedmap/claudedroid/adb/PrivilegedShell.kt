@@ -11,5 +11,7 @@ interface PrivilegedShell {
 
 object Shells {
   suspend fun pick(ctx: Context): PrivilegedShell? =
-    listOf(ShizukuShell(ctx), TermuxShell(ctx)).firstOrNull { it.available() }
+    listOf(ShizukuShell(ctx), TermuxShell(ctx)).firstOrNull {
+      try { it.available() } catch (_: Throwable) { false }
+    }
 }

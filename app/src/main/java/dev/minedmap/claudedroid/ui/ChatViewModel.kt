@@ -8,6 +8,7 @@ import dev.minedmap.claudedroid.data.Db
 import dev.minedmap.claudedroid.data.MessageEntity
 import dev.minedmap.claudedroid.data.Prefs
 import dev.minedmap.claudedroid.data.SessionEntity
+import dev.minedmap.claudedroid.net.BridgeAutoStart
 import dev.minedmap.claudedroid.net.BridgeClient
 import dev.minedmap.claudedroid.net.UiEvent
 import kotlinx.coroutines.CancellationException
@@ -51,6 +52,10 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
       if (s0 == null) { isRunning.value = false; return@launch }
       add("user", text)
       if (s0.title == "새 세션") dao.update(s0.copy(title = text.take(30)))
+      if (!client.health()) {
+        add("tool_result", "브리지 자동 시작 중…")
+        bridgeUp.value = BridgeAutoStart.ensure(getApplication())
+      }
       var claudeId: String? = s0.claudeSessionId
       val rid = UUID.randomUUID().toString()
       currentReq = rid

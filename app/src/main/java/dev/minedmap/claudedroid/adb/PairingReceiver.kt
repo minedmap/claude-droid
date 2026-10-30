@@ -31,8 +31,10 @@ class PairingReceiver : BroadcastReceiver() {
         val cp = withTimeoutOrNull(10_000) { AdbMdns.connectPort.filterNotNull().first() }
         if (cp == null) { PairingNotification.show(app, "실패: 연결 포트 못 찾음"); return@launch }
         val c = shell.connect(cp)
-        if (c.isSuccess) { Prefs(app).lastConnectPort = cp; PairingNotification.show(app, "연결됨", false) }
+        if (c.isSuccess) { Prefs(app).apply { lastConnectPort = cp; paired = true }; PairingNotification.show(app, "연결됨", false) }
         else PairingNotification.show(app, "실패: ${c.exceptionOrNull()?.message}")
+      } catch (e: Throwable) {
+        try { PairingNotification.show(app, "오류: ${e.message}") } catch (_: Throwable) {}
       } finally {
         pending.finish()
       }

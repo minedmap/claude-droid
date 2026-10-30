@@ -18,4 +18,7 @@ class Prefs(ctx: Context) {
   var lastConnectPort: Int
     get() = sp.getInt("lastConnectPort", 0)
     set(v) = sp.edit().putInt("lastConnectPort", v).apply()
+  var paired: Boolean
+    get() = sp.getBoolean("paired", false)
+    set(v) = sp.edit().putBoolean("paired", v).apply()
 }

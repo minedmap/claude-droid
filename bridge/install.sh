@@ -3,6 +3,7 @@ set -e
 cd "$(dirname "$0")"
 pkg install -y nodejs android-tools termux-api termux-services
 mkdir -p ~/claude-droid && cp server.mjs ~/claude-droid/
+cp start.sh ~/claude-droid/start.sh && chmod +x ~/claude-droid/start.sh
 [ -f ~/.claude-droid-token ] || head -c 24 /dev/urandom | base64 | tr -d '/+=' > ~/.claude-droid-token
 chmod 600 ~/.claude-droid-token
 # 앱의 RUN_COMMAND 허용
