@@ -30,6 +30,15 @@ class BridgeClient(private val base: String, private val token: String) {
     }.getOrDefault(false)
   }
 
+  /** null = 브리지 응답 없음 */
+  suspend fun adbConnected(): Boolean? = withContext(Dispatchers.IO) {
+    runCatching {
+      http.newCall(Request.Builder().url("$base/adb").header("X-Token", token).build()).execute().use {
+        if (!it.isSuccessful) null else JSONObject(it.body!!.string()).optBoolean("connected", false)
+      }
+    }.getOrNull()
+  }
+
   fun chat(prompt: String, sessionId: String?, cwd: String, reqId: String, skipPerms: Boolean,
            model: String? = null, effort: String? = null): Flow<UiEvent> = callbackFlow {
     val body = JSONObject().put("prompt", prompt).put("sessionId", sessionId ?: JSONObject.NULL)

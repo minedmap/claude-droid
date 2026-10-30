@@ -7,7 +7,7 @@ const fake = fileURLToPath(new URL('./fake-claude.sh', import.meta.url));
 let srv, base;
 const H = { 'X-Token': 't0k', 'Content-Type': 'application/json' };
 before(async () => {
-  srv = createBridge({ token: 't0k', claudeBin: fake });
+  srv = createBridge({ token: 't0k', adbBin: fileURLToPath(new URL('./fake-adb.sh', import.meta.url)), claudeBin: fake });
   await new Promise(r => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
@@ -63,6 +63,13 @@ test('cancel kills whole process group fast', async () => {
   const { events } = await p;
   assert.equal(events.at(-1).type, 'done');
   assert.ok(Date.now() - t0 < 5000);
+});
+test('adb status parses devices', async () => {
+  const r = await fetch(base + '/adb', { headers: H });
+  const j = await r.json();
+  assert.equal(j.connected, true);
+  assert.deepEqual(j.devices[0], { serial: 'localhost:40123', state: 'device' });
+  assert.equal(j.devices.length, 2);
 });
 test('404 unknown route', async () => {
   assert.equal((await fetch(base + '/nope', { headers: H })).status, 404);

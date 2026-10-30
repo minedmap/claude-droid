@@ -40,6 +40,7 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
   val isRunning = MutableStateFlow(false)
   val partial = MutableStateFlow("")
   val bridgeUp = MutableStateFlow<Boolean?>(null)
+  val adbUp = MutableStateFlow<Boolean?>(null)
   private var currentReq: String? = null
   val pending = MutableStateFlow<List<Attachment>>(emptyList())
   val uploading = MutableStateFlow(0)
@@ -80,6 +81,19 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
   }
 
   fun refreshHealth() { viewModelScope.launch { bridgeUp.value = client.health() } }
+
+  init {
+    viewModelScope.launch {
+      while (true) {
+        if (!isRunning.value) {
+          val a = client.adbConnected()
+          bridgeUp.value = a != null
+          adbUp.value = a
+        }
+        kotlinx.coroutines.delay(5000)
+      }
+    }
+  }
 
   private suspend fun add(role: String, text: String) {
     dao.insert(MessageEntity(sessionId = sid, role = role, text = text, ts = System.currentTimeMillis()))

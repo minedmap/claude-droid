@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -15,7 +15,7 @@ function tmpDir() {
   return d;
 }
 
-export function createBridge({ token, claudeBin = 'claude' }) {
+export function createBridge({ token, claudeBin = 'claude', adbBin = process.env.ADB_BIN || 'adb' }) {
   return http.createServer((req, res) => {
     handle(req, res).catch(e => {
       if (!res.headersSent) res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: String(e.message || e) }));
@@ -29,6 +29,16 @@ export function createBridge({ token, claudeBin = 'claude' }) {
     if (req.method === 'POST' && url.pathname === '/upload') return upload(req, res, url);
     if (req.method === 'GET' && url.pathname === '/file') return serveFile(res, url, false);
     if (req.method === 'GET' && url.pathname === '/stat') return serveFile(res, url, true);
+    if (req.method === 'GET' && url.pathname === '/adb') {
+      const out = await new Promise(ok => {
+        execFile(adbBin, ['devices'], { timeout: 5000 }, (e, so) => ok(e ? '' : String(so)));
+      });
+      const devices = out.split('\n').slice(1).map(l => l.trim().split(/\s+/)).filter(p => p.length >= 2 && p[0])
+        .map(([serial, state]) => ({ serial, state }));
+      const connected = devices.some(d => d.state === 'device');
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ connected, devices }));
+      return;
+    }
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}'); return;
     }

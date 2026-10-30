@@ -72,6 +72,7 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   val msgs by vm.messages.collectAsState()
   val running by vm.isRunning.collectAsState()
   val up by vm.bridgeUp.collectAsState()
+  val adb by vm.adbUp.collectAsState()
   val session by vm.session.collectAsState()
   val partial by vm.partial.collectAsState()
   var input by remember { mutableStateOf("") }
@@ -94,7 +95,15 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
     contentWindowInsets = WindowInsets(0),
     topBar = {
       TopAppBar(
-        title = { Text(session?.title ?: "채팅", maxLines = 1) },
+        title = {
+          Column {
+            Text(session?.title ?: "채팅", maxLines = 1)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+              StatusDot("브리지", up)
+              StatusDot("adb", if (up == false) null else adb)
+            }
+          }
+        },
         navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "뒤로") } },
         actions = {
           if (running) IconButton(onClick = { vm.stop() }) { Icon(Icons.Filled.Stop, "중지") }
@@ -239,4 +248,10 @@ private fun ModelBar(model: String?, effort: String?, enabled: Boolean,
       confirmButton = { androidx.compose.material3.TextButton(onClick = { onModel(txt); custom = false }) { Text("확인") } },
       dismissButton = { androidx.compose.material3.TextButton(onClick = { custom = false }) { Text("취소") } })
   }
+}
+
+@Composable
+private fun StatusDot(label: String, ok: Boolean?) {
+  val c = when (ok) { true -> Color(0xFF2E7D32); false -> Color(0xFFC62828); null -> Color.Gray }
+  Text("● $label", color = c, style = MaterialTheme.typography.labelSmall)
 }

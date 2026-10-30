@@ -77,7 +77,8 @@ fun ConnectScreen(onBack: () -> Unit) {
   var connPortTxt by remember { mutableStateOf("") }
   var pairResult by remember { mutableStateOf("") }
   var pairing by remember { mutableStateOf(false) }
-  var pairedOk by remember { mutableStateOf(prefs.lastConnectPort > 0) }
+  var pairedOk by remember { mutableStateOf(false) }
+  var wifiDbg by remember { mutableStateOf(false) }
   LaunchedEffect(mdnsPair) { if (mdnsPair != null) pairPortTxt = mdnsPair.toString() }
 
   LaunchedEffect(Unit) {
@@ -89,6 +90,8 @@ fun ConnectScreen(onBack: () -> Unit) {
           scope.launch { runCatching { if (BridgeAutoStart.ensure(ctx)) bridge = true } }
         }
         dev = DevSettingsIntents.devOptionsEnabled(ctx)
+        wifiDbg = runCatching { android.provider.Settings.Global.getInt(ctx.contentResolver, "adb_wifi_enabled", 0) == 1 }.getOrDefault(false)
+        pairedOk = bridge && wifiDbg && BridgeClient(prefs.bridgeUrl, prefs.token).adbConnected() == true
         shellName = Shells.pick(ctx)?.name ?: "없음"
       } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
@@ -134,6 +137,7 @@ fun ConnectScreen(onBack: () -> Unit) {
       }
       if (Build.VERSION.SDK_INT >= 30) {
         Step("4. 무선 디버깅", pairedOk) {
+          Text("무선 디버깅: " + (if (wifiDbg) "켜짐" else "꺼짐") + " · adb: " + (if (pairedOk) "연결됨" else if (!bridge) "확인 불가(브리지 꺼짐)" else "끊김"))
           Button(onClick = {
             try {
               AdbMdns.start(ctx)
