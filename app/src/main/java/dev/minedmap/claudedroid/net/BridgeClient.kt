@@ -25,9 +25,11 @@ class BridgeClient(private val base: String, private val token: String) {
     }.getOrDefault(false)
   }
 
-  fun chat(prompt: String, sessionId: String?, cwd: String, reqId: String, skipPerms: Boolean): Flow<UiEvent> = callbackFlow {
+  fun chat(prompt: String, sessionId: String?, cwd: String, reqId: String, skipPerms: Boolean,
+           model: String? = null, effort: String? = null): Flow<UiEvent> = callbackFlow {
     val body = JSONObject().put("prompt", prompt).put("sessionId", sessionId ?: JSONObject.NULL)
-      .put("cwd", cwd).put("reqId", reqId).put("skipPerms", skipPerms).toString().toRequestBody(json)
+      .put("cwd", cwd).put("reqId", reqId).put("skipPerms", skipPerms)
+      .put("model", model ?: JSONObject.NULL).put("effort", effort ?: JSONObject.NULL).toString().toRequestBody(json)
     val req = Request.Builder().url("$base/chat").header("X-Token", token).post(body).build()
     val src = EventSources.createFactory(http).newEventSource(req, object : EventSourceListener() {
       override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const running = new Map(); // reqId -> child
 
 function tmpDir() {
@@ -26,9 +27,11 @@ export function createBridge({ token, claudeBin = 'claude' }) {
       res.writeHead(200).end(); return;
     }
     if (req.method === 'POST' && req.url === '/chat') {
-      const { prompt, sessionId, cwd, reqId = String(Date.now()), skipPerms = true } = await readJson(req);
+      const { prompt, sessionId, cwd, reqId = String(Date.now()), skipPerms = true, model, effort } = await readJson(req);
       const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
       if (sessionId) args.push('--resume', sessionId);
+      if (typeof model === 'string' && /^[A-Za-z0-9._\-\[\]]{1,64}$/.test(model)) args.push('--model', model);
+      if (EFFORTS.includes(effort)) args.push('--effort', effort);
       if (skipPerms) args.push('--dangerously-skip-permissions');
       const dir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
       const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir() }, stdio: ['ignore', 'pipe', 'pipe'] });

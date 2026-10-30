@@ -37,6 +37,15 @@ test('TMPDIR always set (claude-code#15637)', async () => {
   const { events } = await chat({ prompt: 'yo' });
   assert.ok(events[0].tmp.length > 0);
 });
+test('model/effort passed as flags', async () => {
+  const { events } = await chat({ prompt: 'yo', model: 'opus', effort: 'high' });
+  assert.match(events[0].args, /--model opus/);
+  assert.match(events[0].args, /--effort high/);
+});
+test('invalid effort ignored', async () => {
+  const { events } = await chat({ prompt: 'yo', model: '', effort: 'bogus' });
+  assert.doesNotMatch(events[0].args, /--effort|--model/);
+});
 test('404 unknown route', async () => {
   assert.equal((await fetch(base + '/nope', { headers: H })).status, 404);
 });

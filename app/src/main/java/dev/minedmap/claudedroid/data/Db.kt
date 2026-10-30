@@ -5,7 +5,8 @@ import kotlinx.coroutines.flow.Flow
 
 @Entity data class SessionEntity(
   @PrimaryKey(autoGenerate = true) val id: Long = 0,
-  val claudeSessionId: String? = null, val title: String, val cwd: String, val updatedAt: Long)
+  val claudeSessionId: String? = null, val title: String, val cwd: String, val updatedAt: Long,
+  val model: String? = null, val effort: String? = null)
 
 @Entity(foreignKeys = [ForeignKey(entity = SessionEntity::class, parentColumns = ["id"],
   childColumns = ["sessionId"], onDelete = ForeignKey.CASCADE)], indices = [Index("sessionId")])
@@ -23,13 +24,19 @@ data class MessageEntity(
   @Insert suspend fun insert(m: MessageEntity): Long
 }
 
-@Database(entities = [SessionEntity::class, MessageEntity::class], version = 1, exportSchema = false)
+@Database(entities = [SessionEntity::class, MessageEntity::class], version = 2, exportSchema = false)
 abstract class Db : RoomDatabase() {
   abstract fun dao(): ChatDao
   companion object {
+    val M1_2 = object : androidx.room.migration.Migration(1, 2) {
+      override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE SessionEntity ADD COLUMN model TEXT")
+        db.execSQL("ALTER TABLE SessionEntity ADD COLUMN effort TEXT")
+      }
+    }
     @Volatile private var i: Db? = null
     fun get(ctx: Context): Db = i ?: synchronized(this) {
-      i ?: Room.databaseBuilder(ctx.applicationContext, Db::class.java, "chat.db").build().also { i = it }
+      i ?: Room.databaseBuilder(ctx.applicationContext, Db::class.java, "chat.db").addMigrations(M1_2).build().also { i = it }
     }
   }
 }

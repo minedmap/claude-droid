@@ -55,7 +55,7 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
       val rid = UUID.randomUUID().toString()
       currentReq = rid
       try {
-        client.chat(text, claudeId, s0.cwd, rid, prefs.skipPerms).collect { ev ->
+        client.chat(text, claudeId, s0.cwd, rid, prefs.skipPerms, s0.model, s0.effort).collect { ev ->
           when (ev) {
             is UiEvent.SessionStarted -> if (claudeId == null) {
               claudeId = ev.id
@@ -84,6 +84,12 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
         }
       }
     }
+  }
+
+  fun setModel(m: String?) = updateSession { it.copy(model = m?.trim()?.ifBlank { null }) }
+  fun setEffort(e: String?) = updateSession { it.copy(effort = e) }
+  private fun updateSession(f: (SessionEntity) -> SessionEntity) {
+    viewModelScope.launch { dao.session(sid)?.let { dao.update(f(it)); session.value = dao.session(sid) } }
   }
 
   fun stop() {

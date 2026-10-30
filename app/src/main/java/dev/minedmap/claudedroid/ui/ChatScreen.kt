@@ -78,6 +78,7 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
           Text("브리지 꺼짐 — 탭하여 연결", color = Color.White)
         }
       }
+      ModelBar(session?.model, session?.effort, !running, vm::setModel, vm::setEffort)
       LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState,
         verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
         items(msgs, key = { it.id }) { Bubble(it) }
@@ -115,5 +116,50 @@ private fun Bubble(m: MessageEntity) {
           style = MaterialTheme.typography.bodySmall, maxLines = if (open) Int.MAX_VALUE else 2)
       }
     }
+  }
+}
+
+private val MODELS = listOf(null, "opus", "sonnet", "haiku", "fable")
+private val EFFORTS = listOf(null, "low", "medium", "high", "xhigh", "max")
+
+@Composable
+private fun ModelBar(model: String?, effort: String?, enabled: Boolean,
+                     onModel: (String?) -> Unit, onEffort: (String?) -> Unit) {
+  var mOpen by remember { mutableStateOf(false) }
+  var eOpen by remember { mutableStateOf(false) }
+  var custom by remember { mutableStateOf(false) }
+  Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Box {
+      androidx.compose.material3.AssistChip(enabled = enabled, onClick = { mOpen = true },
+        label = { Text("모델: " + (model ?: "기본")) })
+      androidx.compose.material3.DropdownMenu(mOpen, { mOpen = false }) {
+        MODELS.forEach { m ->
+          androidx.compose.material3.DropdownMenuItem(text = { Text(m ?: "기본") },
+            onClick = { onModel(m); mOpen = false })
+        }
+        androidx.compose.material3.DropdownMenuItem(text = { Text("직접 입력…") },
+          onClick = { custom = true; mOpen = false })
+      }
+    }
+    Box {
+      androidx.compose.material3.AssistChip(enabled = enabled, onClick = { eOpen = true },
+        label = { Text("effort: " + (effort ?: "기본")) })
+      androidx.compose.material3.DropdownMenu(eOpen, { eOpen = false }) {
+        EFFORTS.forEach { e ->
+          androidx.compose.material3.DropdownMenuItem(text = { Text(e ?: "기본") },
+            onClick = { onEffort(e); eOpen = false })
+        }
+      }
+    }
+  }
+  if (custom) {
+    var txt by remember { mutableStateOf(model ?: "") }
+    androidx.compose.material3.AlertDialog(
+      onDismissRequest = { custom = false },
+      title = { Text("모델 ID") },
+      text = { OutlinedTextField(txt, { txt = it }, singleLine = true, placeholder = { Text("claude-opus-5-5") }) },
+      confirmButton = { androidx.compose.material3.TextButton(onClick = { onModel(txt); custom = false }) { Text("확인") } },
+      dismissButton = { androidx.compose.material3.TextButton(onClick = { custom = false }) { Text("취소") } })
   }
 }
