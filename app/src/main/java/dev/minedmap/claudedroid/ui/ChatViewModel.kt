@@ -17,6 +17,7 @@ import dev.minedmap.claudedroid.net.UiEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,7 +33,9 @@ data class Attachment(val name: String, val path: String)
 class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(app) {
   private val dao = Db.get(app).dao()
   private val prefs = Prefs(app)
-  private val client = BridgeClient(prefs.bridgeUrl, prefs.token)
+  private val client get() = BridgeClient.of(prefs)
+  /** status polling runs only while the chat screen is started (set by ChatScreen lifecycle) */
+  val polling = MutableStateFlow(false)
 
   val messages: StateFlow<List<MessageEntity>> =
     dao.messages(sid).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -59,9 +62,17 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
             }
           }.getOrNull()
         } ?: uri.lastPathSegment ?: "upload.bin"
+        val size = withContext(Dispatchers.IO) {
+          runCatching {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+              if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+            }
+          }.getOrNull() ?: -1L
+        }
         val cwd = dao.session(sid)?.cwd ?: prefs.defaultCwd
-        val input = app.contentResolver.openInputStream(uri) ?: throw IllegalStateException("파일을 열 수 없음")
-        val path = client.upload(cwd, name, input)
+        val path = client.upload(cwd, name, size) {
+          app.contentResolver.openInputStream(uri) ?: throw java.io.IOException("파일을 열 수 없음")
+        }
         pending.value = pending.value + Attachment(path.substringAfterLast('/'), path)
       } catch (e: CancellationException) {
         throw e
@@ -84,13 +95,15 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
 
   init {
     viewModelScope.launch {
-      while (true) {
-        if (!isRunning.value) {
-          val a = client.adbConnected()
-          bridgeUp.value = a != null
-          adbUp.value = a
+      polling.collectLatest { on ->
+        while (on) {
+          if (!isRunning.value) {
+            val a = client.adbConnected()
+            bridgeUp.value = a != null
+            adbUp.value = a
+          }
+          kotlinx.coroutines.delay(5000)
         }
-        kotlinx.coroutines.delay(5000)
       }
     }
   }
@@ -130,22 +143,24 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
       try {
         client.chat(text, claudeId, s0.cwd, rid, prefs.skipPerms, s0.model, s0.effort).collect { ev ->
           when (ev) {
-            is UiEvent.SessionStarted -> if (claudeId == null) {
+            is UiEvent.SessionStarted -> if (ev.id != claudeId) {
               claudeId = ev.id
               dao.session(sid)?.let { dao.update(it.copy(claudeSessionId = ev.id)) }
             }
             is UiEvent.Delta -> partial.value += ev.text
-            is UiEvent.AssistantText -> { partial.value = ""; add("assistant", ev.text); addFiles(FilePathExtractor.fromText(ev.text)) }
+            is UiEvent.AssistantText -> { partial.value = ""; add("assistant", ev.text); addFiles(FilePathExtractor.fromText(ev.text, s0.cwd)) }
             is UiEvent.ToolUse -> {
               add("tool", "${ev.name}: ${ev.input}")
-              toolPaths += FilePathExtractor.fromToolUse(ev.name, ev.input)
+              toolPaths += FilePathExtractor.fromToolUse(ev.name, ev.input, s0.cwd)
             }
             is UiEvent.ToolResult -> {
-              add("tool_result", ev.text.take(4000))
+              if (ev.text.isNotBlank() || ev.isError)
+                add(if (ev.isError) "tool_error" else "tool_result", ev.text.ifBlank { "(오류)" }.take(4000))
               val ps = toolPaths.toList(); toolPaths.clear()
-              addFiles(ps + FilePathExtractor.fromText(ev.text))
+              addFiles(ps + FilePathExtractor.fromText(ev.text, s0.cwd))
             }
-            is UiEvent.Raw -> add("tool_result", ev.text)
+            is UiEvent.ToolImage -> saveImage(ev)?.let { add("image", it) }
+            is UiEvent.Raw -> if (ev.text.isNotBlank()) add("tool_result", ev.text)
             is UiEvent.Result -> ev.costUsd?.let { add("tool_result", "💰 $" + String.format(java.util.Locale.US, "%.4f", it)) }
             is UiEvent.Done -> if (ev.code != 0) add("error", ev.stderr.ifBlank { "exit ${ev.code}" })
           }
@@ -167,6 +182,16 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
         }
       }
     }
+  }
+
+  /** Decode to filesDir/images; DB stores only the local path (base64 rows could exceed Room's ~2MB cursor window). */
+  private suspend fun saveImage(ev: UiEvent.ToolImage): String? = withContext(Dispatchers.IO) {
+    runCatching {
+      val bytes = android.util.Base64.decode(ev.base64, android.util.Base64.DEFAULT)
+      val ext = when (ev.mediaType.substringAfter('/').lowercase()) { "jpeg" -> "jpg"; "" -> "png"; else -> ev.mediaType.substringAfter('/').lowercase().filter { it.isLetterOrDigit() } }
+      val dir = java.io.File(getApplication<Application>().filesDir, "images").apply { mkdirs() }
+      java.io.File(dir, "${UUID.randomUUID()}.$ext").apply { writeBytes(bytes) }.absolutePath
+    }.getOrNull()
   }
 
   fun setModel(m: String?) = updateSession { it.copy(model = m?.trim()?.ifBlank { null }) }

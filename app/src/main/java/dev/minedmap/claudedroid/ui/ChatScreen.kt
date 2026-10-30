@@ -69,6 +69,19 @@ import dev.minedmap.claudedroid.data.MessageEntity
 fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   val app = LocalContext.current.applicationContext as Application
   val vm: ChatViewModel = viewModel(key = "chat-$sessionId", factory = ChatViewModel.Factory(app, sessionId))
+  @Suppress("DEPRECATION")
+  val owner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+  androidx.compose.runtime.DisposableEffect(owner) {
+    val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+      when (e) {
+        androidx.lifecycle.Lifecycle.Event.ON_START -> vm.polling.value = true
+        androidx.lifecycle.Lifecycle.Event.ON_STOP -> vm.polling.value = false
+        else -> {}
+      }
+    }
+    owner.lifecycle.addObserver(obs)
+    onDispose { owner.lifecycle.removeObserver(obs); vm.polling.value = false }
+  }
   val msgs by vm.messages.collectAsState()
   val running by vm.isRunning.collectAsState()
   val up by vm.bridgeUp.collectAsState()
@@ -176,6 +189,7 @@ private fun Bubble(m: MessageEntity) {
   val copy = { copyText(ctx, m.text) }
   when (m.role) {
     "file" -> FileCard(m.text)
+    "image" -> LocalImageCard(m.text)
     "user" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
       Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer,
         modifier = Modifier.combinedClickable(onClick = {}, onLongClick = copy)) {
@@ -192,12 +206,14 @@ private fun Bubble(m: MessageEntity) {
     }
     else -> {
       var open by remember { mutableStateOf(false) }
-      Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant,
+      val isErr = m.role == "tool_error"
+      Surface(shape = RoundedCornerShape(8.dp),
+        color = if (isErr) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { open = !open }, onLongClick = copy)) {
         SelectionContainer {
           Text(
-            (if (m.role == "tool") "🔧 " else "↳ ") + m.text,
-            Modifier.padding(8.dp), fontFamily = FontFamily.Monospace,
+            (when (m.role) { "tool" -> "🔧 "; "tool_error" -> "⚠ "; else -> "↳ " }) + m.text,
+            Modifier.padding(8.dp), color = if (isErr) MaterialTheme.colorScheme.onErrorContainer else Color.Unspecified, fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodySmall, maxLines = if (open) Int.MAX_VALUE else 2)
         }
       }

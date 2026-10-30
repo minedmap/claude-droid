@@ -170,4 +170,38 @@ test('/root/ maps to UBUNTU_ROOTFS', async () => {
     assert.equal((await getF('/root/../../etc/passwd')).status, 403);
   } finally { delete process.env.UBUNTU_ROOTFS; }
 });
+test('rootfs autodetect: containers/ubuntu/rootfs preferred over installed-rootfs', async () => {
+  const pre = path.join(work, 'prefix');
+  const c = path.join(pre, 'var/lib/proot-distro/containers/ubuntu/rootfs');
+  const legacy = path.join(pre, 'var/lib/proot-distro/installed-rootfs/ubuntu');
+  fs.mkdirSync(path.join(c, 'root'), { recursive: true }); fs.mkdirSync(path.join(legacy, 'root'), { recursive: true });
+  fs.writeFileSync(path.join(c, 'root', 'a.png'), 'new'); fs.writeFileSync(path.join(legacy, 'root', 'a.png'), 'old');
+  const oldP = process.env.PREFIX; process.env.PREFIX = pre;
+  try {
+    assert.equal(await (await getF('/root/a.png')).text(), 'new');
+    fs.rmSync(path.join(pre, 'var/lib/proot-distro/containers'), { recursive: true });
+    assert.equal(await (await getF('/root/a.png')).text(), 'old');
+  } finally { if (oldP === undefined) delete process.env.PREFIX; else process.env.PREFIX = oldP; }
+});
+test('non-/root guest paths (/tmp, /opt) fall back to rootfs when missing on host', async () => {
+  const rootfs = path.join(work, 'rootfs2');
+  fs.mkdirSync(path.join(rootfs, 'opt/x'), { recursive: true });
+  fs.writeFileSync(path.join(rootfs, 'opt/x', 'screen-cd-test.png'), 'PNG');
+  process.env.UBUNTU_ROOTFS = rootfs;
+  try {
+    const r = await getF('/opt/x/screen-cd-test.png');
+    assert.equal(r.status, 200); assert.equal(await r.text(), 'PNG');
+    assert.equal((await getF('/etc/passwd')).status, 403); // exists on host -> not remapped
+  } finally { delete process.env.UBUNTU_ROOTFS; }
+});
+test('upload into /root cwd lands in rootfs and returns guest path', async () => {
+  const rootfs = path.join(work, 'rootfs3'); fs.mkdirSync(path.join(rootfs, 'root/proj'), { recursive: true });
+  process.env.UBUNTU_ROOTFS = rootfs;
+  try {
+    const r = await fetch(`${base}/upload?cwd=/root/proj&name=u.txt`, { method: 'POST', headers: { 'X-Token': 't0k' }, body: 'hi' });
+    const { path: p } = await r.json();
+    assert.equal(p, '/root/proj/.claude-droid/uploads/u.txt');
+    assert.equal(fs.readFileSync(path.join(rootfs, p), 'utf8'), 'hi');
+  } finally { delete process.env.UBUNTU_ROOTFS; }
+});
 after(() => fs.rmSync(work, { recursive: true, force: true }));

@@ -55,8 +55,8 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
       if (typeof model === 'string' && /^[A-Za-z0-9._\-\[\]]{1,64}$/.test(model)) args.push('--model', model);
       if (EFFORTS.includes(effort)) args.push('--effort', effort);
       if (skipPerms) args.push('--dangerously-skip-permissions');
-      const dir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
-      const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir() }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      const { dir, guestCwd } = chatCwd(cwd, claudeBin);
+      const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir(), ...(guestCwd ? { CLAUDE_DROID_CWD: guestCwd } : {}) }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
       running.set(reqId, child);
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
       const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
@@ -78,9 +78,21 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
   }
 }
 
+// proot cwd (e.g. /root/proj): run in its host path and tell the wrapper the guest path via CLAUDE_DROID_CWD.
+// Only when the wrapper understands that variable; old wrappers would pass the host path to --work-dir.
+function chatCwd(cwd, claudeBin) {
+  if (!cwd || typeof cwd !== 'string' || !path.isAbsolute(cwd)) return { dir: os.homedir() };
+  if (fs.existsSync(cwd) && passthrough(cwd)) return { dir: cwd };
+  const host = toHost(path.resolve(cwd));
+  let aware = false;
+  try { aware = fs.readFileSync(claudeBin, 'utf8').includes('CLAUDE_DROID_CWD'); } catch {}
+  if (host !== cwd && aware && fs.existsSync(host)) return { dir: host, guestCwd: path.resolve(cwd) };
+  return { dir: fs.existsSync(cwd) ? cwd : os.homedir() };
+}
+
 const MAX_BYTES = 50 * 1024 * 1024;
 const TYPES = {
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', heic: 'image/heic', heif: 'image/heif',
   md: 'text/markdown; charset=utf-8', json: 'application/json', txt: 'text/plain; charset=utf-8', csv: 'text/csv; charset=utf-8',
   log: 'text/plain; charset=utf-8', html: 'text/html; charset=utf-8', pdf: 'application/pdf',
 };
@@ -101,7 +113,8 @@ function uniquePath(dir, name) {
 
 async function upload(req, res, url) {
   const cwd = url.searchParams.get('cwd');
-  const base = cwd && path.isAbsolute(cwd) && fs.existsSync(cwd) ? cwd : os.homedir();
+  const hostCwd = cwd && path.isAbsolute(cwd) ? toHost(path.resolve(cwd)) : null;
+  const base = hostCwd && fs.existsSync(hostCwd) ? hostCwd : os.homedir();
   const dir = path.join(base, '.claude-droid', 'uploads');
   fs.mkdirSync(dir, { recursive: true });
   const target = uniquePath(dir, sanitizeName(url.searchParams.get('name')));
@@ -118,14 +131,38 @@ async function upload(req, res, url) {
     out.on('error', bad);
   });
   if (over) { fs.rmSync(target, { force: true }); return json(res, 413, { error: 'too large' }); }
-  json(res, 200, { path: target });
+  json(res, 200, { path: toGuest(target) });
+}
+
+const PREFIX = () => process.env.PREFIX || '/data/data/com.termux/files/usr';
+export function ubuntuRootfs() {
+  if (process.env.UBUNTU_ROOTFS) return process.env.UBUNTU_ROOTFS;
+  const pd = path.join(PREFIX(), 'var/lib/proot-distro');
+  const cands = [path.join(pd, 'containers/ubuntu/rootfs'), path.join(pd, 'installed-rootfs/ubuntu')];
+  return cands.find(c => fs.existsSync(c)) || cands[0];
+}
+// paths proot shares 1:1 with Termux: never remap
+function passthrough(abs) {
+  return ['/data/data/com.termux', '/sdcard', '/storage', os.homedir()].some(r => abs === r || abs.startsWith(r + '/'));
+}
+/** guest (proot) path -> host (Termux) path. /root always maps; others only when missing on host but present in rootfs. */
+export function toHost(abs) {
+  if (passthrough(abs)) return abs;
+  const rootfs = ubuntuRootfs();
+  const cand = path.join(rootfs, abs);
+  if (abs === '/root' || abs.startsWith('/root/')) return fs.existsSync(path.join(rootfs, 'root')) ? cand : abs;
+  return !fs.existsSync(abs) && fs.existsSync(cand) ? cand : abs;
+}
+/** host path inside rootfs -> guest path (what Claude sees) */
+export function toGuest(p) {
+  const rootfs = ubuntuRootfs();
+  return p.startsWith(rootfs + '/') ? p.slice(rootfs.length) : p;
 }
 
 function resolveAllowed(p) {
   if (!p || !path.isAbsolute(p)) return { code: 400 };
-  let abs = path.resolve(p);
-  const rootfs = process.env.UBUNTU_ROOTFS || path.join(process.env.PREFIX || '/data/data/com.termux/files/usr', 'var/lib/proot-distro/installed-rootfs/ubuntu');
-  if (abs.startsWith('/root/') && fs.existsSync(path.join(rootfs, 'root'))) abs = path.join(rootfs, abs);
+  const abs = toHost(path.resolve(p));
+  const rootfs = ubuntuRootfs();
   let real;
   try { real = fs.realpathSync(abs); } catch { real = null; }
   const roots = [os.homedir(), rootfs, '/sdcard', '/storage/emulated/0', os.tmpdir()];

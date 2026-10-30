@@ -15,7 +15,7 @@ object BridgeAutoStart {
   suspend fun ensure(ctx: Context): Boolean {
     val app = ctx.applicationContext
     val prefs = Prefs(app)
-    val client = BridgeClient(prefs.bridgeUrl, prefs.token)
+    val client = BridgeClient.of(prefs)
     return try {
       if (client.health()) return true
       mutex.withLock {

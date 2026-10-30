@@ -8,7 +8,10 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import okio.source
 import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
@@ -20,9 +23,17 @@ import java.util.concurrent.TimeUnit
 
 data class FileStat(val exists: Boolean, val size: Long, val isDir: Boolean)
 
+/** Lightweight handle; every instance shares ONE OkHttpClient (connection + thread pool). */
 class BridgeClient(private val base: String, private val token: String) {
-  private val http = OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
+  private val http get() = SHARED
   private val json = "application/json".toMediaType()
+
+  companion object {
+    private val SHARED: OkHttpClient by lazy { OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build() }
+    const val MAX_UPLOAD = 50L * 1024 * 1024
+    /** Always reads current prefs, so URL/token changes in Settings take effect. */
+    fun of(p: dev.minedmap.claudedroid.data.Prefs) = BridgeClient(p.bridgeUrl, p.token)
+  }
 
   suspend fun health(): Boolean = withContext(Dispatchers.IO) {
     runCatching {
@@ -64,12 +75,18 @@ class BridgeClient(private val base: String, private val token: String) {
     }
   }
 
-  suspend fun upload(cwd: String, name: String, input: InputStream): String = withContext(Dispatchers.IO) {
-    val bytes = input.use { it.readBytes() }
+  /** Streams [open]'s data (no full read into memory). [size] < 0 = unknown (chunked). */
+  suspend fun upload(cwd: String, name: String, size: Long, open: () -> InputStream): String = withContext(Dispatchers.IO) {
+    if (size > MAX_UPLOAD) throw IOException("파일이 너무 큼 (최대 50MB)")
+    val body = object : RequestBody() {
+      override fun contentType() = "application/octet-stream".toMediaType()
+      override fun contentLength() = if (size >= 0) size else -1L
+      override fun writeTo(sink: BufferedSink) { open().source().use { sink.writeAll(it) } }
+    }
     val url = "$base/upload".toHttpUrl().newBuilder().addQueryParameter("cwd", cwd).addQueryParameter("name", name).build()
-    val req = Request.Builder().url(url).header("X-Token", token)
-      .post(bytes.toRequestBody("application/octet-stream".toMediaType())).build()
+    val req = Request.Builder().url(url).header("X-Token", token).post(body).build()
     http.newCall(req).execute().use { r ->
+      if (r.code == 413) throw IOException("파일이 너무 큼 (최대 50MB)")
       if (!r.isSuccessful) throw IOException("업로드 실패 HTTP ${r.code}")
       JSONObject(r.body!!.string()).getString("path")
     }
@@ -89,7 +106,7 @@ class BridgeClient(private val base: String, private val token: String) {
   suspend fun fetch(path: String): ByteArray = withContext(Dispatchers.IO) {
     val url = "$base/file".toHttpUrl().newBuilder().addQueryParameter("path", path).build()
     http.newCall(Request.Builder().url(url).header("X-Token", token).build()).execute().use { r ->
-      if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
+      if (!r.isSuccessful) throw IOException(when (r.code) { 403 -> "403 접근 불가 경로"; 404 -> "404 파일 없음"; 413 -> "413 너무 큼"; else -> "HTTP ${r.code}" })
       r.body!!.bytes()
     }
   }

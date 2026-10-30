@@ -9,7 +9,18 @@ class FilePathExtractorTest {
     assertEquals(listOf("/a/x.md"), FilePathExtractor.fromToolUse("Edit", """{"file_path":"/a/x.md"}"""))
     assertEquals(listOf("/a/n.ipynb"), FilePathExtractor.fromToolUse("NotebookEdit", """{"notebook_path":"/a/n.ipynb"}"""))
   }
-  @Test fun readSkipped() = assertEquals(emptyList<String>(), FilePathExtractor.fromToolUse("Read", """{"file_path":"/a/x.png"}"""))
+  @Test fun readImageOnly() {
+    assertEquals(listOf("/a/x.png"), FilePathExtractor.fromToolUse("Read", """{"file_path":"/a/x.png"}"""))
+    assertEquals(emptyList<String>(), FilePathExtractor.fromToolUse("Read", """{"file_path":"/a/x.kt"}"""))
+  }
+  @Test fun bashOutputs() = assertEquals(listOf("/tmp/screen.png", "/root/p/o.json", "/sdcard/s.png"),
+    FilePathExtractor.fromToolUse("Bash", """{"command":"adb exec-out screencap -p > /tmp/screen.png 2>&1; curl -o o.json x; adb shell screencap -p /sdcard/s.png; ls /x/y.png"}""", "/root/p"))
+  @Test fun bashNoOutput() = assertEquals(emptyList<String>(), FilePathExtractor.fromToolUse("Bash", """{"command":"ls -la > /dev/null"}"""))
+  @Test fun koreanAndSpaces() = assertEquals(listOf("/sdcard/사진/스크린샷.png", "/root/my file.md"),
+    FilePathExtractor.fromText("저장: /sdcard/사진/스크린샷.png 그리고 `/root/my file.md`"))
+  @Test fun tildeAndRelativeWithCwd() = assertEquals(listOf("/root/foo.png", "/root/proj/out/a.png"),
+    FilePathExtractor.fromText("~/foo.png and out/a.png", "/root/proj"))
+  @Test fun tildeTermuxHome() = assertEquals(listOf("/data/data/com.termux/files/home/a.md"), FilePathExtractor.fromText("~/a.md"))
   @Test fun mcpFields() = assertEquals(listOf("/s/shot.png", "/s/out.json"),
     FilePathExtractor.fromToolUse("mcp__x__screenshot", """{"output_path":"/s/shot.png","path":"/s/out.json"}""").sortedByDescending { it.endsWith("png") })
   @Test fun mcpUnknownExtIgnored() = assertEquals(emptyList<String>(), FilePathExtractor.fromToolUse("mcp__x__y", """{"path":"/s/a.bin"}"""))

@@ -20,5 +20,17 @@ class StreamParserTest {
     StreamParser.parse("""{"type":"stream_event","event":{"type":"message_start"}}"""))
   @Test fun cost() = assertEquals(listOf(UiEvent.Result("ok", 0.0123)),
     StreamParser.parse("""{"type":"result","result":"ok","total_cost_usd":0.0123}"""))
+  @Test fun toolResultImage() = assertEquals(listOf(UiEvent.ToolResult("cap"), UiEvent.ToolImage("image/jpeg", "QUJD")),
+    StreamParser.parse("""{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"cap"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"QUJD"}}]}]}}"""))
+  @Test fun imageOnlyNoEmptyBubble() = assertEquals(listOf(UiEvent.ToolImage("image/png", "QQ==")),
+    StreamParser.parse("""{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QQ=="}}]}]}}"""))
+  @Test fun emptyResultSkipped() = assertEquals(emptyList<UiEvent>(),
+    StreamParser.parse("""{"type":"user","message":{"content":[{"type":"tool_result","content":""}]}}"""))
+  @Test fun isError() = assertEquals(listOf(UiEvent.ToolResult("boom", true)),
+    StreamParser.parse("""{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"boom"}]}}"""))
+  @Test fun missingFieldsNoThrow() {
+    assertEquals(emptyList<UiEvent>(), StreamParser.parse("""{"type":"system","subtype":"init"}"""))
+    assertEquals(listOf(UiEvent.ToolUse("?", "{}")), StreamParser.parse("""{"type":"assistant","message":{"content":[{"type":"text"},{"type":"tool_use"}]}}"""))
+  }
   @Test fun garbage() = assertEquals(listOf(UiEvent.Raw("not json")), StreamParser.parse("not json"))
 }

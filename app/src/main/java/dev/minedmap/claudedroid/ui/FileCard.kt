@@ -70,7 +70,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-private val IMG_EXT = setOf("png", "jpg", "jpeg", "gif", "webp")
+private val IMG_EXT = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif")
 private val TEXT_EXT = setOf("txt", "csv", "log", "html", "svg")
 private const val MAX_IMG = 20L * 1024 * 1024
 private const val MAX_TEXT = 2L * 1024 * 1024
@@ -111,7 +111,8 @@ private fun saveToDownloads(ctx: Context, name: String, mime: String, bytes: Byt
 @Composable
 fun FileCard(path: String) {
   val ctx = LocalContext.current
-  val client = remember { val p = Prefs(ctx); BridgeClient(p.bridgeUrl, p.token) }
+  // cheap handle over the shared OkHttpClient; re-read each composition so Settings changes apply
+  val client = BridgeClient.of(Prefs(ctx))
   val scope = rememberCoroutineScope()
   val name = path.substringAfterLast('/')
   val ext = name.substringAfterLast('.', "").lowercase()
@@ -121,6 +122,9 @@ fun FileCard(path: String) {
   var expanded by remember(path) { mutableStateOf(false) }
   var zoom by remember(path) { mutableStateOf(false) }
   var pendingBytes by remember { mutableStateOf<ByteArray?>(null) }
+  var err by remember(path) { mutableStateOf<String?>(null) }
+  var cached by remember(path) { mutableStateOf<ByteArray?>(null) }
+  suspend fun bytes(): ByteArray = cached ?: client.fetch(path).also { cached = it }
 
   val createDoc = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
     val b = pendingBytes
@@ -134,16 +138,24 @@ fun FileCard(path: String) {
   LaunchedEffect(path) {
     val st = client.stat(path)
     stat = st
-    if (st != null && st.exists && !st.isDir) runCatching {
+    if (st == null) err = "브리지 응답 없음 또는 접근 불가 경로"
+    if (st != null && st.exists && !st.isDir) try {
       when {
-        ext in IMG_EXT && st.size <= MAX_IMG -> bitmap = withContext(Dispatchers.Default) { decodeScaled(client.fetch(path)) }
+        ext in IMG_EXT && st.size <= MAX_IMG -> {
+          val b = bytes()
+          bitmap = withContext(Dispatchers.Default) { decodeScaled(b) } ?: throw IllegalStateException("이미지 디코딩 실패")
+        }
+        ext == "pdf" && st.size <= MAX_IMG -> {
+          val b = bytes()
+          bitmap = withContext(Dispatchers.IO) { renderPdfPage(ctx, path, b) } ?: throw IllegalStateException("PDF 렌더 실패")
+        }
         (ext == "md" || ext == "json" || ext in TEXT_EXT) && st.size <= MAX_TEXT -> {
-          val raw = String(client.fetch(path), Charsets.UTF_8)
+          val raw = String(bytes(), Charsets.UTF_8)
           text = if (ext == "json") prettyJson(raw) else raw
         }
       }
-      Unit
-    }
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e
+    } catch (e: Exception) { err = "미리보기 실패: ${e.message ?: e.javaClass.simpleName}" }
   }
 
   fun toast(m: String) = Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show()
@@ -151,7 +163,7 @@ fun FileCard(path: String) {
   fun download() {
     scope.launch {
       try {
-        val bytes = client.fetch(path)
+        val bytes = bytes()
         if (Build.VERSION.SDK_INT >= 29) {
           val ok = withContext(Dispatchers.IO) { saveToDownloads(ctx, name, mimeOf(ext), bytes) }
           toast(if (ok) "Download/ClaudeDroid 에 저장됨" else "저장 실패")
@@ -166,18 +178,7 @@ fun FileCard(path: String) {
   fun share() {
     scope.launch {
       try {
-        val bytes = client.fetch(path)
-        val uri = withContext(Dispatchers.IO) {
-          val dir = File(ctx.cacheDir, "shared").apply { mkdirs() }
-          val f = File(dir, name.replace(Regex("[^A-Za-z0-9._-]"), "_"))
-          f.writeBytes(bytes)
-          FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f)
-        }
-        val i = Intent(Intent.ACTION_SEND).apply {
-          type = mimeOf(ext); putExtra(Intent.EXTRA_STREAM, uri)
-          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        ctx.startActivity(Intent.createChooser(i, "공유").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        shareBytes(ctx, name, ext, bytes())
       } catch (e: Exception) { toast("공유 실패: ${e.message}") }
     }
   }
@@ -189,8 +190,10 @@ fun FileCard(path: String) {
         Column(Modifier.weight(1f)) {
           Text(name, style = MaterialTheme.typography.titleSmall, maxLines = 1)
           Text(
-            when { stat == null -> "불러오는 중…"; stat?.exists == false -> "파일 없음"; else -> fmtSize(stat!!.size) },
+            when { stat == null && err == null -> "불러오는 중…"; stat == null -> "상태 확인 실패"; stat?.exists == false -> "파일 없음"; else -> fmtSize(stat!!.size) },
             style = MaterialTheme.typography.bodySmall)
+          err?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+          if (ext == "svg") Text("SVG 소스 표시", style = MaterialTheme.typography.labelSmall)
         }
       }
       bitmap?.let { bmp ->
@@ -213,22 +216,115 @@ fun FileCard(path: String) {
     }
   }
 
-  if (zoom && bitmap != null) {
-    Dialog(onDismissRequest = { zoom = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-      var scale by remember { mutableStateOf(1f) }
-      var ox by remember { mutableStateOf(0f) }
-      var oy by remember { mutableStateOf(0f) }
-      Box(Modifier.fillMaxSize().background(Color.Black).clickable { zoom = false }
-        .pointerInput(Unit) {
-          detectTransformGestures { _, pan, z, _ ->
-            scale = (scale * z).coerceIn(1f, 8f)
-            ox += pan.x; oy += pan.y
+  if (zoom && bitmap != null) ZoomDialog(bitmap!!, name) { zoom = false }
+}
+
+@Composable
+private fun ZoomDialog(bmp: Bitmap, name: String, onDismiss: () -> Unit) {
+  Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    var scale by remember { mutableStateOf(1f) }
+    var ox by remember { mutableStateOf(0f) }
+    var oy by remember { mutableStateOf(0f) }
+    Box(Modifier.fillMaxSize().background(Color.Black).clickable { onDismiss() }
+      .pointerInput(Unit) {
+        detectTransformGestures { _, pan, z, _ ->
+          scale = (scale * z).coerceIn(1f, 8f)
+          ox += pan.x; oy += pan.y
+        }
+      }) {
+      Image(bmp.asImageBitmap(), name,
+        Modifier.fillMaxSize().graphicsLayer(scaleX = scale, scaleY = scale, translationX = ox, translationY = oy),
+        contentScale = ContentScale.Fit)
+    }
+  }
+}
+
+/** First page of a PDF via the platform PdfRenderer (needs a seekable file). */
+private fun renderPdfPage(ctx: Context, key: String, bytes: ByteArray): Bitmap? {
+  val dir = File(ctx.cacheDir, "pdf").apply { mkdirs() }
+  val f = File(dir, "${key.hashCode().toUInt()}.pdf").apply { writeBytes(bytes) }
+  return try {
+    android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+      val r = android.graphics.pdf.PdfRenderer(pfd)
+      try {
+        if (r.pageCount == 0) return null
+        val pg = r.openPage(0)
+        try {
+          val w = 1200; val h = (w.toFloat() * pg.height / pg.width).toInt().coerceIn(1, 4000)
+          Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { b ->
+            b.eraseColor(android.graphics.Color.WHITE)
+            pg.render(b, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
           }
-        }) {
-        Image(bitmap!!.asImageBitmap(), name,
-          Modifier.fillMaxSize().graphicsLayer(scaleX = scale, scaleY = scale, translationX = ox, translationY = oy),
-          contentScale = ContentScale.Fit)
+        } finally { pg.close() }
+      } finally { r.close() }
+    }
+  } finally { f.delete() }
+}
+
+/** Share via FileProvider. Old shared temp files (>1h) are purged; each share gets its own subdir so names never collide. */
+private suspend fun shareBytes(ctx: Context, name: String, ext: String, bytes: ByteArray) {
+  val uri = withContext(Dispatchers.IO) {
+    val root = File(ctx.cacheDir, "shared").apply { mkdirs() }
+    val cutoff = System.currentTimeMillis() - 3600_000
+    root.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { it.deleteRecursively() }
+    val dir = File(root, System.nanoTime().toString()).apply { mkdirs() }
+    val safe = name.replace(Regex("""[/\\:*?"<>|]"""), "_").ifBlank { "file" }
+    val f = File(dir, safe).apply { writeBytes(bytes) }
+    FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f)
+  }
+  val i = Intent(Intent.ACTION_SEND).apply {
+    type = mimeOf(ext); putExtra(Intent.EXTRA_STREAM, uri)
+    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+  }
+  ctx.startActivity(Intent.createChooser(i, "공유").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
+/** Image returned inside a tool result, saved by ChatViewModel under filesDir/images. */
+@Composable
+fun LocalImageCard(localPath: String) {
+  val ctx = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val name = localPath.substringAfterLast('/')
+  val ext = name.substringAfterLast('.', "png").lowercase()
+  var bitmap by remember(localPath) { mutableStateOf<Bitmap?>(null) }
+  var err by remember(localPath) { mutableStateOf<String?>(null) }
+  var zoom by remember(localPath) { mutableStateOf(false) }
+  LaunchedEffect(localPath) {
+    val b = withContext(Dispatchers.IO) { runCatching { decodeScaled(File(localPath).readBytes()) }.getOrNull() }
+    if (b == null) err = "이미지를 열 수 없음" else bitmap = b
+  }
+  fun toast(m: String) = Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show()
+  Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(Icons.Filled.Image, null)
+        Text("도구 결과 이미지", style = MaterialTheme.typography.titleSmall)
+      }
+      err?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+      bitmap?.let { bmp ->
+        Image(bmp.asImageBitmap(), name, Modifier.fillMaxWidth().heightIn(max = 240.dp).clickable { zoom = true }, contentScale = ContentScale.Fit)
+        Row {
+          TextButton(onClick = { zoom = true }) { Icon(Icons.Filled.Fullscreen, null, Modifier.size(18.dp)); Text(" 확대") }
+          TextButton(onClick = {
+            scope.launch {
+              try {
+                val bytes = withContext(Dispatchers.IO) { File(localPath).readBytes() }
+                if (Build.VERSION.SDK_INT >= 29) {
+                  val ok = withContext(Dispatchers.IO) { saveToDownloads(ctx, name, mimeOf(ext), bytes) }
+                  toast(if (ok) "Download/ClaudeDroid 에 저장됨" else "저장 실패")
+                } else toast("Android 10 이상에서 지원")
+              } catch (e: Exception) { toast("저장 실패: ${e.message}") }
+            }
+          }) { Icon(Icons.Filled.Download, null, Modifier.size(18.dp)); Text(" 다운로드") }
+          TextButton(onClick = {
+            scope.launch {
+              try { shareBytes(ctx, name, ext, withContext(Dispatchers.IO) { File(localPath).readBytes() }) }
+              catch (e: Exception) { toast("공유 실패: ${e.message}") }
+            }
+          }) { Icon(Icons.Filled.Share, null, Modifier.size(18.dp)); Text(" 공유") }
+        }
       }
     }
   }
+  if (zoom && bitmap != null) ZoomDialog(bitmap!!, name) { zoom = false }
 }

@@ -17,6 +17,7 @@ cat > $PREFIX/var/service/claude-droid/run <<'EOF'
 export HOME=/data/data/com.termux/files/home
 export PATH=/data/data/com.termux/files/usr/bin:$PATH
 export TMPDIR=/data/data/com.termux/files/usr/tmp
+for d in /data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs /data/data/com.termux/files/usr/var/lib/proot-distro/installed-rootfs/ubuntu; do [ -d "$d" ] && export UBUNTU_ROOTFS="$d" && break; done
 cd "$HOME"
 [ -x "$HOME/claude-droid/claude-proot" ] && export CLAUDE_BIN="$HOME/claude-droid/claude-proot"
 exec /data/data/com.termux/files/usr/bin/node "$HOME/claude-droid/server.mjs" 2>&1
@@ -31,7 +32,7 @@ if proot-distro login ubuntu -- test -x /root/.local/bin/claude 2>/dev/null; the
   cat > ~/claude-droid/claude-proot <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 H=/data/data/com.termux/files/home
-exec proot-distro login ubuntu --work-dir "$PWD" -- env IS_SANDBOX=1 HOME=/root PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin /root/.local/bin/claude "$@"
+exec proot-distro login ubuntu --work-dir "${CLAUDE_DROID_CWD:-$PWD}" -- env IS_SANDBOX=1 HOME=/root PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin /root/.local/bin/claude "$@"
 EOF
   chmod +x ~/claude-droid/claude-proot
   echo "claude: proot ubuntu 사용"

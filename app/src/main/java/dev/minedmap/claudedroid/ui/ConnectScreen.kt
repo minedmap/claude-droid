@@ -85,13 +85,13 @@ fun ConnectScreen(onBack: () -> Unit) {
     while (true) {
       try {
         termux = TermuxShell.isInstalled(ctx)
-        bridge = BridgeClient(prefs.bridgeUrl, prefs.token).health()
+        bridge = BridgeClient.of(prefs).health()
         if (!bridge) {
           scope.launch { runCatching { if (BridgeAutoStart.ensure(ctx)) bridge = true } }
         }
         dev = DevSettingsIntents.devOptionsEnabled(ctx)
         wifiDbg = runCatching { android.provider.Settings.Global.getInt(ctx.contentResolver, "adb_wifi_enabled", 0) == 1 }.getOrDefault(false)
-        pairedOk = bridge && wifiDbg && BridgeClient(prefs.bridgeUrl, prefs.token).adbConnected() == true
+        pairedOk = bridge && wifiDbg && BridgeClient.of(prefs).adbConnected() == true
         shellName = Shells.pick(ctx)?.name ?: "없음"
       } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
