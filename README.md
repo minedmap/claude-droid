@@ -36,6 +36,27 @@ With wireless debugging (adb) connected, Claude can operate the phone itself.
 
 There is no native Claude Code binary for Android (2.1.113+), so the official Linux build runs in a proot Ubuntu inside Termux.
 
+## First-time setup on a new phone (checklist)
+
+The full order for a fresh device. Run the commands from the Installation section below at the matching steps.
+
+1. **Install F-Droid** from https://f-droid.org. Allow "install unknown apps" for your browser when asked.
+   - The Play Store Termux is outdated and does not work. Use the F-Droid build.
+2. **Install Termux and Termux:API** (F-Droid). Open Termux once and run `pkg upgrade` (press Enter at prompts).
+3. **Ubuntu + Claude Code**: Installation step 2. Log in to Claude, then `/exit`.
+4. **Bridge**: Installation step 3. Copy the TOKEN printed at the end (`cat ~/.claude-droid-token` shows it again).
+5. **Fully exit and reopen Termux** (required): Termux notification → **Exit**, then open Termux again. On a first `termux-services` install the bridge service only starts after this. Check with `bash ~/claude-droid/start.sh`.
+6. **Enable developer options**: Settings → About phone → Software information → tap **Build number** 7 times (location varies by vendor).
+7. **Enable wireless debugging**: Settings → Developer options → **Wireless debugging** ON (needs Wi-Fi, Android 11+). The app's wizard handles pairing.
+8. **Install the app** (`app-debug.apk` from [Releases](https://github.com/minedmap/claude-droid/releases/latest)).
+   - Allow **notifications** on first launch (needed for background runs and pairing-code entry).
+   - Settings → Apps → Claude Droid and Termux → Battery → **Unrestricted / don't optimize**, so long runs are not killed.
+9. **Paste the token in the app → connection wizard**: allow RUN_COMMAND, then pair wireless debugging.
+10. *(Optional)* Screen-control MCP: `bash ~/bridge/mcp-setup.sh`.
+11. *(Optional)* USB device control: `bash ~/claude-droid/usb-setup.sh`.
+    - Some phones (some Samsung, Xiaomi, etc.) need an **OTG** toggle turned on in Settings.
+    - Plug the device in with an OTG adapter/cable and allow Claude Droid in the permission popup (you can re-request it under app Settings → USB devices).
+
 ## Installation
 
 1. Install **Termux** and **Termux:API** from F-Droid, then run `pkg upgrade` in Termux.

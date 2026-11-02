@@ -17,6 +17,27 @@ Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
 - Android용 Claude Code 네이티브 바이너리가 없어(2.1.113+), Termux의 proot Ubuntu 안에 공식 설치본을 둔다.
 - 세션 = Claude `session_id` + 작업 폴더. 앱 재시작 후에도 `--resume`으로 이어짐.
 
+## 처음 설치하는 기기 (체크리스트)
+
+새 폰 기준 전체 순서입니다. 아래 「설치」 절의 명령은 이 순서 안에서 실행합니다.
+
+1. **F-Droid 설치**: https://f-droid.org 에서 APK를 받아 설치합니다. 브라우저가 "출처를 알 수 없는 앱 설치" 허용을 요구하면 허용합니다.
+   - Play 스토어판 Termux는 오래돼서 동작하지 않습니다. 반드시 F-Droid판을 쓰세요.
+2. **Termux, Termux:API 설치**(F-Droid) → Termux를 한 번 실행한 뒤 `pkg upgrade` (질문이 나오면 Enter).
+3. **Ubuntu + Claude Code 설치**: 아래 「설치」 2번 명령. Claude 로그인 후 `/exit`.
+4. **브리지 설치**: 아래 「설치」 3번 명령. 마지막에 나오는 TOKEN을 복사합니다(다시 보기: `cat ~/.claude-droid-token`).
+5. **Termux 완전 종료 후 재실행**(필수): 알림창의 Termux 알림 → **Exit** → Termux를 다시 엽니다. `termux-services`를 처음 설치하면 이걸 해야 브리지 서비스가 자동 실행됩니다. 이후 `bash ~/claude-droid/start.sh`로 확인합니다.
+6. **개발자 옵션 켜기**: 설정 → 휴대전화 정보 → 소프트웨어 정보 → **빌드번호** 7번 탭(제조사마다 위치가 조금 다름).
+7. **무선 디버깅 켜기**: 설정 → 개발자 옵션 → **무선 디버깅** ON(Wi-Fi 연결 필요, Android 11+). 페어링은 앱의 연결 마법사가 안내합니다.
+8. **앱 APK 설치**: [Releases](https://github.com/minedmap/claude-droid/releases/latest)의 `app-debug.apk`.
+   - 첫 실행 시 **알림 권한 허용**(백그라운드 실행, 페어링 코드 입력에 필요).
+   - 설정 → 앱 → Claude Droid, Termux → 배터리 → **제한 없음/최적화 안 함**(긴 작업 중 종료 방지).
+9. **앱에서 토큰 붙여넣기 → 연결 마법사**: RUN_COMMAND 권한 허용 → 무선 디버깅 페어링.
+10. **(선택) 화면 조작 MCP**: `bash ~/bridge/mcp-setup.sh`.
+11. **(선택) USB 장치 제어**: `bash ~/claude-droid/usb-setup.sh` 실행.
+    - 일부 기기(삼성 일부, 샤오미 등)는 설정에서 **OTG** 항목을 따로 켜야 합니다.
+    - OTG 젠더/케이블로 장치를 꽂고, 뜨는 권한 팝업에서 Claude Droid를 허용합니다(앱 설정 → USB 장치에서 다시 요청 가능).
+
 ## 설치
 1. F-Droid에서 **Termux**, **Termux:API** 설치. Termux에서 `pkg upgrade`.
 2. Ubuntu + Claude Code:
