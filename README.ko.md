@@ -43,6 +43,24 @@ Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
 - 잘못된 `model`/`effort` → 400 `{error:'invalid model'|'invalid effort'}`. 모든 4xx는 JSON `{error}`.
 - `/file`·`/stat`은 자격증명류(`.credentials.json`, `.ssh/`, `*.pem`, `*.key`, `.env` 등) 403.
 
+## USB 호스트 제어 (v0.6)
+
+OTG로 폰에 꽂은 USB 장치를 Claude가 조회·조작합니다. **루팅 불필요**: Android `UsbManager`는 권한 한 번 탭하면 앱이 장치를 직접 열 수 있고, 앱이 이를 루프백 API로 Claude에 노출합니다.
+
+```
+[Claude (proot)] --stdio MCP--> bridge/usb-mcp.mjs --HTTP + X-Token--> [앱 UsbBridgeService 127.0.0.1:8766]
+[esptool / pyserial / avrdude] --rfc2217:// 또는 socket:// 127.0.0.1:<포트>--> [앱 시리얼 TCP 브리지]
+```
+
+- MCP 도구 12개: `usb_list`, `usb_permission`, `usb_descriptors`, `usb_control`, `usb_transfer`, `serial_open/write/read/lines/close`, `serial_tcp`, `avr_flash`.
+- 시리얼 칩은 usb-serial-for-android 사용: CDC/ACM, FTDI, CP210x, CH34x, PL2303.
+- `avr_flash`: 내장 STK500v1/v2 업로더 (Uno, Nano, 구형 부트로더 Nano, Mega2560). `arduino-cli compile` -> `avr_flash` -> `serial_read` 순환. Leonardo/Micro(AVR109)는 미지원.
+- `serial_tcp`: 포트를 RFC 2217(보드레이트·데이터/패리티/스톱·DTR/RTS·purge 부분집합) 또는 raw TCP로 노출 → esptool/pyserial을 그대로 사용.
+- 설정: Termux에서 `install.sh` 후 `bash ~/claude-droid/usb-setup.sh` (Ubuntu에 `usb` MCP 등록, arduino-cli·pyserial·esptool·nmap 설치). 앱 실행 시 USB 서비스가 자동 시작되고 **설정 -> USB 장치**에서 상태/권한 버튼을 볼 수 있습니다.
+- 채팅 브리지와 같은 토큰 사용. API는 127.0.0.1만 bind하고 `X-Token` 없으면 거부합니다.
+
+한계: Android가 앱에 허용하는 장치만 가능(키보드·저장장치 등 시스템이 잡은 장치는 claim 실패 가능), 커널 드라이버가 필요한 장치는 불가, OTG 전원/허브는 사용자 몫, 장치마다 폰에서 권한 탭 필요.
+
 ## 파일 / 복사 (v0.5)
 
 - **파일 업로드**: 입력창 옆 클립 버튼 → 파일 선택(여러 개) 또는 `[클립보드 이미지 붙여넣기]`. 칩으로 표시되며 전송 시 프롬프트에 `첨부 파일:` 경로 목록이 붙습니다. 파일은 세션 cwd의 `.claude-droid/uploads/`에 저장(최대 50MB).

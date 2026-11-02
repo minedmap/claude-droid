@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 pkg install -y nodejs android-tools termux-api termux-services
 mkdir -p ~/claude-droid && cp server.mjs ~/claude-droid/
 cp start.sh ~/claude-droid/start.sh && chmod +x ~/claude-droid/start.sh
+cp usb-mcp.mjs usb-setup.sh CLAUDE-USB.md ~/claude-droid/ && chmod +x ~/claude-droid/usb-setup.sh
 [ -f ~/.claude-droid-token ] || head -c 24 /dev/urandom | base64 | tr -d '/+=' > ~/.claude-droid-token
 chmod 600 ~/.claude-droid-token
 # 앱의 RUN_COMMAND 허용
@@ -44,3 +45,4 @@ sv-enable claude-droid || true
 sv restart claude-droid || sv up claude-droid || true
 termux-wake-lock
 echo "TOKEN: $(cat ~/.claude-droid-token)   <- 앱 설정에 붙여넣기"
+echo "USB 제어(선택): bash ~/claude-droid/usb-setup.sh  (Ubuntu에 usb MCP 등록 + arduino-cli/esptool 설치)"

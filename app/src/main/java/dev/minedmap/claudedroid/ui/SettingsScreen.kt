@@ -12,6 +12,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.runtime.LaunchedEffect
+import dev.minedmap.claudedroid.usb.UsbClient
+import dev.minedmap.claudedroid.usb.UsbStatus
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -52,6 +57,13 @@ fun SettingsScreen(onBack: () -> Unit, onConnect: () -> Unit) {
   var testMsg by remember { mutableStateOf<String?>(null) }
   var testOk by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
+  var usb by remember { mutableStateOf<UsbStatus?>(null) }
+  LaunchedEffect(Unit) {
+    while (true) {
+      usb = UsbClient.status(prefs.token)
+      delay(3000)
+    }
+  }
 
   Scaffold(topBar = {
     TopAppBar(title = { Text("설정") },
@@ -88,6 +100,18 @@ fun SettingsScreen(onBack: () -> Unit, onConnect: () -> Unit) {
       }) { Text(if (testing) "확인 중…" else "연결 테스트") }
       testMsg?.let { Text(it, color = if (testOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
       Button(onClick = onConnect) { Text("연결 마법사") }
+      Text("USB 장치", style = MaterialTheme.typography.titleMedium)
+      val u = usb
+      Text(
+        when { u == null -> "USB 서버 확인 중…"; u.up -> "USB 서버 켜짐 (127.0.0.1:8766) · 장치 ${u.devices.size}개"; else -> "USB 서버 꺼짐" },
+        color = if (u?.up == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+      u?.devices?.forEach { dev ->
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+          Text("${dev.title}\n${dev.vidpid}${dev.driver?.let { " · $it" } ?: ""}", Modifier.weight(1f))
+          if (dev.hasPermission) Text("권한 있음", color = MaterialTheme.colorScheme.primary)
+          else OutlinedButton(onClick = { scope.launch { UsbClient.requestPermission(prefs.token, dev.id); usb = UsbClient.status(prefs.token) } }) { Text("권한") }
+        }
+      }
     }
   }
 }

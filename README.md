@@ -56,6 +56,24 @@ There is no native Claude Code binary for Android (2.1.113+), so the official Li
 
 **Custom port:** put `BRIDGE_PORT=9000` in `~/claude-droid/env`. The service script and `start.sh` both read it, and it survives reinstalls. Then change the bridge URL in the app settings.
 
+## USB host control (v0.6)
+
+Claude can inspect and drive any USB device plugged into the phone via OTG. **No root needed**: Android's `UsbManager` lets an app open a device after a one-tap permission, and the app exposes it to Claude through a loopback API.
+
+```
+[Claude (proot)] --stdio MCP--> bridge/usb-mcp.mjs --HTTP + X-Token--> [app UsbBridgeService 127.0.0.1:8766]
+[esptool / pyserial / avrdude] --rfc2217:// or socket:// 127.0.0.1:<port>--> [app serial TCP bridge]
+```
+
+- 12 MCP tools: `usb_list`, `usb_permission`, `usb_descriptors`, `usb_control`, `usb_transfer`, `serial_open/write/read/lines/close`, `serial_tcp`, `avr_flash`.
+- Serial chips via [usb-serial-for-android](https://github.com/mik3y/usb-serial-for-android): CDC/ACM, FTDI, CP210x, CH34x, PL2303.
+- `avr_flash`: built-in STK500v1/v2 uploader (Uno, Nano, old-bootloader Nano, Mega2560). Typical loop: `arduino-cli compile` -> `avr_flash` -> `serial_read`. Leonardo/Micro (AVR109) is not supported.
+- `serial_tcp` exposes a port as RFC 2217 (subset: baud, data/parity/stop, DTR/RTS, purge) or raw TCP so esptool/pyserial work unchanged.
+- Setup: run `bash ~/claude-droid/usb-setup.sh` in Termux after `install.sh` (registers the `usb` MCP in Ubuntu, installs arduino-cli, pyserial, esptool, nmap). The app starts the USB service on launch; **Settings -> USB 장치** shows status and a permission button.
+- Same token as the chat bridge; the API binds 127.0.0.1 only and rejects requests without `X-Token`.
+
+Limits: only devices Android lets an app claim (some HID/storage devices are held by the system and fail to claim); devices that need a kernel driver beyond raw USB/serial are out of reach; OTG power and hubs are your responsibility; each device needs the permission tap on the phone.
+
 ## Bridge API
 
 All requests need the `X-Token` header. The bridge listens on `127.0.0.1` only.

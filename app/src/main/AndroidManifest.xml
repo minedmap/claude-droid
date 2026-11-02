@@ -4,6 +4,7 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
   <uses-permission android:name="com.termux.permission.RUN_COMMAND"/>
+  <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
   <queries>
     <package android:name="com.termux"/>
     <package android:name="moe.shizuku.privileged.api"/>
@@ -17,8 +18,14 @@
         <action android:name="android.intent.action.MAIN"/>
         <category android:name="android.intent.category.LAUNCHER"/>
       </intent-filter>
+      <intent-filter>
+        <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+      </intent-filter>
+      <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" android:resource="@xml/usb_device_filter"/>
     </activity>
     <service android:name=".service.ChatService" android:exported="false"
+        android:foregroundServiceType="dataSync"/>
+    <service android:name=".usb.UsbBridgeService" android:exported="false"
         android:foregroundServiceType="dataSync"/>
     <receiver android:name=".adb.PairingReceiver" android:exported="false"/>
     <receiver android:name=".adb.TermuxResultReceiver" android:exported="false"/>

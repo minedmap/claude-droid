@@ -45,6 +45,7 @@ import dev.minedmap.claudedroid.ui.SettingsScreen
 class MainActivity : ComponentActivity() {
   override fun onResume() {
     super.onResume()
+    dev.minedmap.claudedroid.usb.UsbBridgeService.start(this)
     lifecycleScope.launch { try { BridgeAutoStart.ensure(this@MainActivity) } catch (_: Throwable) {} }
   }
 

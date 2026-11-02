@@ -7,7 +7,7 @@ android {
   compileSdk = 34
   defaultConfig {
     applicationId = "dev.minedmap.claudedroid"
-    minSdk = 26; targetSdk = 34; versionCode = 9; versionName = "0.5.3"
+    minSdk = 26; targetSdk = 34; versionCode = 10; versionName = "0.6.0"
   }
   buildFeatures { compose = true; aidl = true }
   compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -29,6 +29,7 @@ dependencies {
   implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.26.0")
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")
+  implementation("com.github.mik3y:usb-serial-for-android:3.9.0")
   testImplementation("junit:junit:4.13.2")
   testImplementation("org.json:json:20240303")
 }
