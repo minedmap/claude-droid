@@ -21,14 +21,14 @@ class HexUtilTest {
 
 class IntelHexTest {
   @Test fun parsesDataAndFillsGaps() {
-    val img = IntelHex.parse(":04000200AABBCCDD74\n:00000001FF").data
+    val img = IntelHex.parse(":04000200AABBCCDDEC\n:00000001FF").data
     assertEquals(6, img.size)
     assertEquals(0xFF.toByte(), img[0]); assertEquals(0xAA.toByte(), img[2]); assertEquals(0xDD.toByte(), img[5])
   }
   @Test fun checksumEnforced() {
     try { IntelHex.parse(":04000200AABBCCDD75\n:00000001FF"); fail() } catch (e: IllegalArgumentException) { assertTrue(e.message!!.contains("checksum")) }
   }
-  @Test fun needsEof() { try { IntelHex.parse(":04000200AABBCCDD74"); fail() } catch (_: IllegalArgumentException) {} }
+  @Test fun needsEof() { try { IntelHex.parse(":04000200AABBCCDDEC"); fail() } catch (_: IllegalArgumentException) {} }
   @Test fun extLinear() {
     // 0x0001_0000 base, 1 byte at offset 0 -> image length 0x10001
     val img = IntelHex.parse(":020000040001F9\n:0100000055AA\n:00000001FF").data
@@ -37,7 +37,7 @@ class IntelHexTest {
   }
   @Test fun realRecords() {
     val img = IntelHex.parse(":100000000C9434000C943E000C943E000C943E0082\n:00000001FF").data
-    assertEquals(16, img.size); assertEquals(0x0C.toByte(), img[0]); assertEquals(0x34.toByte(), img[3])
+    assertEquals(16, img.size); assertEquals(0x0C.toByte(), img[0]); assertEquals(0x34.toByte(), img[2])
   }
 }
 
