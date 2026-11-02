@@ -38,6 +38,88 @@ Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
     - 일부 기기(삼성 일부, 샤오미 등)는 설정에서 **OTG** 항목을 따로 켜야 합니다.
     - OTG 젠더/케이블로 장치를 꽂고, 뜨는 권한 팝업에서 Claude Droid를 허용합니다(앱 설정 → USB 장치에서 다시 요청 가능).
 
+### 명령어 상세 설명
+
+모든 명령은 **Termux**에서 실행합니다(Ubuntu 안이 아님). 길게 눌러 붙여넣기 하면 됩니다.
+
+**1) Termux 패키지 최신화**
+```sh
+pkg upgrade -y
+```
+- Termux 패키지 목록과 설치된 패키지를 최신으로 올립니다. 이걸 건너뛰면 `node` 실행 시 `CANNOT LINK EXECUTABLE` 같은 라이브러리 오류가 납니다.
+- 중간에 설정 파일을 덮어쓸지 물으면 Enter(기본값)를 누릅니다.
+
+**2) Ubuntu + Claude Code 설치**
+```sh
+pkg install -y proot-distro && proot-distro install ubuntu && proot-distro login ubuntu -- bash -c "apt update && apt install -y curl adb && curl -fsSL https://claude.ai/install.sh | bash && /root/.local/bin/claude"
+```
+- `pkg install -y proot-distro`: 루팅 없이 리눅스 배포판을 돌리는 도구를 설치합니다.
+- `proot-distro install ubuntu`: Ubuntu 파일시스템(수백 MB)을 받습니다. Claude Code에는 Android용 바이너리가 없어서 Ubuntu 안에서 돌립니다.
+- `proot-distro login ubuntu -- bash -c "..."`: Ubuntu 안에서 따옴표 속 명령을 실행합니다.
+  - `apt install -y curl adb`: 다운로드 도구와 adb(폰 조작용)를 설치합니다.
+  - `curl -fsSL https://claude.ai/install.sh | bash`: 공식 Claude Code 설치 스크립트입니다. `/root/.local/bin/claude`에 설치됩니다.
+  - `/root/.local/bin/claude`: Claude Code를 처음 실행해 로그인합니다. 브라우저 링크가 뜨면 로그인 후 코드를 붙여넣고, 끝나면 `/exit`.
+
+**3) 브리지 설치**
+```sh
+cd ~ && curl -LO https://github.com/minedmap/claude-droid/releases/latest/download/bridge.zip && unzip -o bridge.zip && bash bridge/install.sh
+```
+- `curl -LO ...bridge.zip`: 최신 브리지 묶음을 홈(`~`)에 받습니다. `unzip -o`는 `~/bridge/`에 풀고 기존 파일을 덮어씁니다.
+- `bash bridge/install.sh`가 하는 일:
+  - `nodejs android-tools termux-api termux-services` 설치
+  - `~/claude-droid/`에 `server.mjs`, `start.sh`, `usb-mcp.mjs`, `usb-setup.sh` 복사
+  - 토큰 `~/.claude-droid-token` 생성(이미 있으면 유지)
+  - `~/.termux/termux.properties`에 `allow-external-apps=true` 설정(앱이 Termux 명령을 실행하도록, RUN_COMMAND)
+  - Ubuntu의 Claude를 부르는 래퍼 `~/claude-droid/claude-proot` 생성
+  - 상주 서비스 `claude-droid` 등록·시작, `termux-wake-lock`(절전 중에도 유지)
+  - 마지막 줄에 `TOKEN: ...` 출력 → 앱에 붙여넣을 값입니다. **Claude 로그인 정보가 아닙니다.**
+- 업데이트할 때도 같은 명령을 다시 실행하면 됩니다(토큰은 유지).
+
+**4) 서비스 상태 확인 / 수동 시작**
+```sh
+bash ~/claude-droid/start.sh
+```
+- 브리지가 응답하면 `bridge ok`. 꺼져 있으면 서비스(`sv up`)로 켜고, 그래도 안 되면 직접 실행합니다.
+- `bridge FAILED`가 나오면 `cat ~/claude-droid/bridge.log`로 원인을 확인합니다.
+
+```sh
+sv status claude-droid
+tail -20 $PREFIX/var/log/sv/claude-droid/current
+```
+- `run (pid ...)`이면 정상. `down`이 반복되면 두 번째 명령으로 서비스 로그를 봅니다.
+- `sv`가 `unable to change to service directory`를 내면 Termux를 완전 종료(알림 → Exit) 후 다시 여세요.
+
+**5) 토큰 다시 보기**
+```sh
+cat ~/.claude-droid-token
+```
+
+**6) (선택) 화면 조작 MCP 등록**
+```sh
+bash ~/bridge/mcp-setup.sh
+```
+- Ubuntu 안에 Node 22와 [claude-in-mobile](https://github.com/AlexGladkov/claude-in-mobile)을 설치하고 Claude에 `mobile` 도구로 등록합니다(스크린샷, 탭, 스와이프, UI 트리).
+- Termux의 adb 키를 Ubuntu로 복사해서, 무선 디버깅을 다시 페어링하지 않아도 됩니다. 마지막에 `adb devices`에 기기가 보이면 성공입니다.
+
+**7) (선택) USB 장치 제어 설정**
+```sh
+bash ~/claude-droid/usb-setup.sh
+```
+- Ubuntu 안에서 단계별로 실행하고, 끝에 `OK`/`FAIL` 요약을 보여줍니다. 한 단계가 실패해도 나머지는 계속합니다.
+  - `node>=20`: MCP 실행용 Node 설치
+  - `usb MCP 등록`: Claude에 `usb` 도구 등록(장치 목록, 권한, 전송, 시리얼, AVR 업로드)
+  - `CLAUDE.md include`: Claude가 USB 사용법 문서를 자동으로 읽도록 연결
+  - `arduino-cli`, `arduino:avr core`: 아두이노 코드 컴파일 도구
+  - `pyserial+esptool`: 파이썬 시리얼 / ESP32·ESP8266 업로드 도구
+  - `nmap+iproute2`: 네트워크 조사 도구
+- 앱이 켜져 있어야 USB 서비스(127.0.0.1:8766)가 응답합니다.
+
+**8) 등록된 Claude 도구 확인**
+```sh
+proot-distro login ubuntu -- /root/.local/bin/claude mcp list
+```
+- `mobile`, `usb`가 목록에 있고 `Connected`이면 Claude가 해당 도구를 쓸 수 있습니다.
+
 ## 설치
 1. F-Droid에서 **Termux**, **Termux:API** 설치. Termux에서 `pkg upgrade`.
 2. Ubuntu + Claude Code:

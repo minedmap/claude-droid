@@ -57,6 +57,88 @@ The full order for a fresh device. Run the commands from the Installation sectio
     - Some phones (some Samsung, Xiaomi, etc.) need an **OTG** toggle turned on in Settings.
     - Plug the device in with an OTG adapter/cable and allow Claude Droid in the permission popup (you can re-request it under app Settings → USB devices).
 
+### Commands explained
+
+Run everything in **Termux** (not inside Ubuntu). Long-press to paste.
+
+**1) Update Termux packages**
+```sh
+pkg upgrade -y
+```
+- Updates the package lists and installed packages. Skipping this causes library errors such as `CANNOT LINK EXECUTABLE` when running `node`.
+- If asked whether to overwrite a config file, press Enter (default).
+
+**2) Ubuntu + Claude Code**
+```sh
+pkg install -y proot-distro && proot-distro install ubuntu && proot-distro login ubuntu -- bash -c "apt update && apt install -y curl adb && curl -fsSL https://claude.ai/install.sh | bash && /root/.local/bin/claude"
+```
+- `pkg install -y proot-distro`: a tool that runs Linux distributions without root.
+- `proot-distro install ubuntu`: downloads the Ubuntu filesystem (a few hundred MB). Claude Code has no Android binary, so it runs inside Ubuntu.
+- `proot-distro login ubuntu -- bash -c "..."`: runs the quoted commands inside Ubuntu.
+  - `apt install -y curl adb`: download tool and adb (phone control).
+  - `curl -fsSL https://claude.ai/install.sh | bash`: the official Claude Code installer, installs to `/root/.local/bin/claude`.
+  - `/root/.local/bin/claude`: first run and login. Open the link, paste the code back, then `/exit`.
+
+**3) Bridge**
+```sh
+cd ~ && curl -LO https://github.com/minedmap/claude-droid/releases/latest/download/bridge.zip && unzip -o bridge.zip && bash bridge/install.sh
+```
+- `curl -LO ...bridge.zip` downloads the latest bridge into `~`; `unzip -o` extracts to `~/bridge/`, overwriting old files.
+- `bash bridge/install.sh`:
+  - installs `nodejs android-tools termux-api termux-services`
+  - copies `server.mjs`, `start.sh`, `usb-mcp.mjs`, `usb-setup.sh` into `~/claude-droid/`
+  - creates the token `~/.claude-droid-token` (kept if it exists)
+  - sets `allow-external-apps=true` in `~/.termux/termux.properties` (lets the app run Termux commands via RUN_COMMAND)
+  - creates `~/claude-droid/claude-proot`, the wrapper that calls Claude inside Ubuntu
+  - registers and starts the `claude-droid` service, runs `termux-wake-lock`
+  - prints `TOKEN: ...` — paste this into the app. **It is not your Claude login.**
+- Re-run the same command to update (the token is kept).
+
+**4) Check / start the service**
+```sh
+bash ~/claude-droid/start.sh
+```
+- Prints `bridge ok` when the bridge answers. Otherwise it starts the service (`sv up`), then falls back to running it directly.
+- On `bridge FAILED`, read `cat ~/claude-droid/bridge.log`.
+
+```sh
+sv status claude-droid
+tail -20 $PREFIX/var/log/sv/claude-droid/current
+```
+- `run (pid ...)` is healthy. If it keeps going `down`, check the service log with the second command.
+- If `sv` says `unable to change to service directory`, fully exit Termux (notification → Exit) and reopen it.
+
+**5) Show the token again**
+```sh
+cat ~/.claude-droid-token
+```
+
+**6) (Optional) Screen-control MCP**
+```sh
+bash ~/bridge/mcp-setup.sh
+```
+- Installs Node 22 and [claude-in-mobile](https://github.com/AlexGladkov/claude-in-mobile) inside Ubuntu and registers it as the `mobile` tool (screenshot, tap, swipe, UI tree).
+- Copies Termux's adb key into Ubuntu, so no re-pairing. Success when `adb devices` lists the phone at the end.
+
+**7) (Optional) USB device control**
+```sh
+bash ~/claude-droid/usb-setup.sh
+```
+- Runs each step inside Ubuntu and prints an `OK`/`FAIL` summary; a failed step does not stop the rest.
+  - `node>=20`: Node for the MCP server
+  - `usb MCP 등록`: registers the `usb` tool (device list, permission, transfers, serial, AVR flashing)
+  - `CLAUDE.md include`: makes Claude read the USB usage notes automatically
+  - `arduino-cli`, `arduino:avr core`: Arduino compiler
+  - `pyserial+esptool`: Python serial and ESP32/ESP8266 flashing
+  - `nmap+iproute2`: network inspection
+- The app must be running for its USB service (127.0.0.1:8766) to answer.
+
+**8) List Claude's registered tools**
+```sh
+proot-distro login ubuntu -- /root/.local/bin/claude mcp list
+```
+- `mobile` and `usb` should be listed as `Connected`.
+
 ## Installation
 
 1. Install **Termux** and **Termux:API** from F-Droid, then run `pkg upgrade` in Termux.
