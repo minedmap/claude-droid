@@ -4,6 +4,13 @@ import { createInterface } from 'node:readline';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { timingSafeEqual } from 'node:crypto';
+
+export function tokenOk(expected, got) {
+  if (typeof expected !== 'string' || !expected || typeof got !== 'string') return false;
+  const a = Buffer.from(expected), b = Buffer.from(got);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const runsById = new Map(); // reqId -> run
@@ -27,7 +34,7 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
   });
 
   async function handle(req, res) {
-    if (req.headers['x-token'] !== token) { return json(res, 401, { error: 'unauthorized' }); }
+    if (!tokenOk(token, req.headers['x-token'])) { return json(res, 401, { error: 'unauthorized' }); }
     const url = new URL(req.url, 'http://x');
     if (req.method === 'POST' && url.pathname === '/upload') return upload(req, res, url);
     if (req.method === 'GET' && url.pathname === '/file') return serveFile(res, url, false);
@@ -51,7 +58,7 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
     }
     if (req.method === 'POST' && url.pathname === '/cancel') {
       const { reqId } = await readJson(req);
-      { const r = runsById.get(reqId); if (r && !r.done) killGroup(r.child); }
+      { const r = runsById.get(String(reqId)); if (r && !r.done) killGroup(r.child); }
       res.writeHead(200).end(); return;
     }
     if (req.method === 'GET' && url.pathname.startsWith('/chat/')) {
@@ -67,8 +74,11 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
       return;
     }
     if (req.method === 'POST' && url.pathname === '/chat') {
-      const { prompt, sessionId, cwd, reqId = String(Date.now()), skipPerms = true, model, effort } = await readJson(req);
+      const body = await readJson(req);
+      const { prompt, sessionId, cwd, skipPerms = true, model, effort } = body;
+      const reqId = String(body.reqId ?? Date.now());
       if (typeof prompt !== 'string' || !prompt) return json(res, 400, { error: 'prompt required' });
+      if (sessionId != null && sessionId !== '' && !(typeof sessionId === 'string' && /^[A-Za-z0-9-]{1,128}$/.test(sessionId))) return json(res, 400, { error: 'invalid sessionId' });
       const hasModel = model != null && model !== '';
       if (hasModel && !(typeof model === 'string' && /^[A-Za-z0-9._\-\[\]]{1,64}$/.test(model))) return json(res, 400, { error: 'invalid model' });
       const hasEffort = effort != null && effort !== '';
@@ -84,7 +94,7 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
       const child = spawn(claudeBin, args, { cwd: dir, env: { ...process.env, TMPDIR: tmpDir(), ...(guestCwd ? { CLAUDE_DROID_CWD: guestCwd } : {}) }, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
       child.stdin.on('error', () => {});
       child.stdin.end(prompt);
-      const run = { reqId: String(reqId), startedAt: Date.now(), done: false, code: null, events: [], bytes: 0, next: 0, subs: new Set(), child };
+      const run = { reqId, startedAt: Date.now(), done: false, code: null, events: [], bytes: 0, next: 0, subs: new Set(), child };
       if (old) clearTimeout(old.timer);
       runsById.set(run.reqId, run);
       sseHead(res);
@@ -274,6 +284,7 @@ function readJson(req) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
   const token = fs.readFileSync(path.join(os.homedir(), '.claude-droid-token'), 'utf8').trim();
+  if (!token) { console.error('empty ~/.claude-droid-token'); process.exit(1); }
   const port = Number(process.env.BRIDGE_PORT) || 8765;
   createBridge({ token, claudeBin: process.env.CLAUDE_BIN || 'claude' }).listen(port, '127.0.0.1', () => console.log(`bridge on 127.0.0.1:${port}`));
 }

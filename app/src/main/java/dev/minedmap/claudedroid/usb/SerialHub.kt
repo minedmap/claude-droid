@@ -78,7 +78,8 @@ class SerialTcp(private val s: SerialSession, val mode: String, port: Int) {
   private fun acceptLoop() {
     while (!closed) {
       val c = try { server.accept() } catch (_: IOException) { return }
-      client?.let { try { it.close() } catch (_: Throwable) {} }
+      // one client at a time: a second local connection must not hijack an active session
+      if (client != null) { try { c.close() } catch (_: Throwable) {}; continue }
       client = c
       Thread({ serve(c) }, "usb-tcp-client").apply { isDaemon = true; start() }
     }

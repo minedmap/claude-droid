@@ -327,3 +327,18 @@ test('upload into /root cwd lands in rootfs and returns guest path', async () =>
   } finally { delete process.env.UBUNTU_ROOTFS; }
 });
 after(() => fs.rmSync(work, { recursive: true, force: true }));
+
+test('tokenOk rejects empty/mismatched tokens', async () => {
+  const { tokenOk } = await import('../server.mjs');
+  assert.equal(tokenOk('', ''), false);
+  assert.equal(tokenOk('abc', undefined), false);
+  assert.equal(tokenOk('abc', 'abd'), false);
+  assert.equal(tokenOk('abc', 'abcd'), false);
+  assert.equal(tokenOk('abc', 'abc'), true);
+});
+test('invalid sessionId is 400', async () => {
+  const r = await fetch(base + '/chat', { method: 'POST', headers: H, body: JSON.stringify({ prompt: 'x', sessionId: '--x y' }) });
+  assert.equal(r.status, 400);
+  const r2 = await fetch(base + '/chat', { method: 'POST', headers: H, body: JSON.stringify({ prompt: 'x', sessionId: { a: 1 } }) });
+  assert.equal(r2.status, 400);
+});
