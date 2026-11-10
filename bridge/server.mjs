@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 
 export function tokenOk(expected, got) {
@@ -58,7 +59,7 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
     }
     if (req.method === 'POST' && url.pathname === '/cancel') {
       const { reqId } = await readJson(req);
-      { const r = runsById.get(String(reqId)); if (r && !r.done) killGroup(r.child); }
+      { const r = runsById.get(String(reqId)); if (r && !r.done) killGroup(r); }
       res.writeHead(200).end(); return;
     }
     if (req.method === 'GET' && url.pathname.startsWith('/chat/')) {
@@ -122,6 +123,7 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
       const rl = createInterface({ input: child.stdout });
       rl.on('line', l => { try { emit(JSON.parse(l)); } catch { emit({ type: 'raw', text: l }); } });
       rl.on('close', part);
+      child.stderr.setEncoding('utf8'); // decode across chunk boundaries (multibyte safe)
       child.stderr.on('data', d => { err += d; });
       child.on('error', e => { err += String(e); if (child.pid === undefined) { exitCode = -1; pending = 1; part(); } });
       child.on('close', code => { exitCode = code ?? -1; part(); });
@@ -227,13 +229,24 @@ export function toGuest(p) {
   return p.startsWith(rootfs + '/') ? p.slice(rootfs.length) : p;
 }
 
-const DENY_NAMES = new Set(['.credentials.json', '.claude-droid-token', '.env', '.git-credentials', '.netrc', 'adbkey', 'adbkey.pub']);
+const DENY_NAMES = new Set(['.credentials.json', '.claude.json', '.claude-droid-token', '.env', '.git-credentials', '.netrc', 'adbkey', 'adbkey.pub']);
 function denied(x) {
   const segs = x.split(/[\\/]/);
   const b = segs[segs.length - 1].toLowerCase();
   if (DENY_NAMES.has(b) && (b !== 'adbkey' && b !== 'adbkey.pub' || segs.includes('.android'))) return true;
   if (b.endsWith('.pem') || b.endsWith('.key')) return true;
   return segs.slice(0, -1).includes('.ssh') || segs.includes('.ssh');
+}
+
+/** realpath of a path that may not exist: resolve the deepest existing ancestor, keep the rest lexically. */
+function realpathLenient(abs) {
+  let p = abs; const tail = [];
+  for (;;) {
+    try { return path.join(fs.realpathSync(p), ...tail); } catch {}
+    const parent = path.dirname(p);
+    if (parent === p) return abs;
+    tail.unshift(path.basename(p)); p = parent;
+  }
 }
 
 function resolveAllowed(p) {
@@ -244,8 +257,9 @@ function resolveAllowed(p) {
   try { real = fs.realpathSync(abs); } catch { real = null; }
   const roots = [os.homedir(), rootfs, '/sdcard', '/storage/emulated/0', os.tmpdir()];
   const under = (x, r) => { let rr = r; try { rr = fs.realpathSync(r); } catch {} return x === rr || x.startsWith(rr + path.sep); };
-  // check the lexical path too so missing files outside roots are 403, not 404
-  const probe = real ?? abs;
+  // missing files: resolve the existing part of the path so they are 403 outside roots (not 404),
+  // yet still allowed under a root that is itself a symlink
+  const probe = real ?? realpathLenient(abs);
   if (denied(abs) || denied(probe)) return { code: 403 };
   if (!roots.some(r => under(probe, r))) return { code: 403 };
   return { code: 0, real };
@@ -263,26 +277,33 @@ function serveFile(res, url, statOnly) {
   fs.createReadStream(r.real).on('error', () => res.destroy()).pipe(res);
 }
 
-function killGroup(child, sig = 'SIGINT') {
+/** SIGINT the whole process group; if the run has not finished 3 s later (leader gone but children
+ *  still hold stdout, or leader ignoring SIGINT), SIGKILL the group. */
+function killGroup(run, sig = 'SIGINT') {
+  const { child } = run;
   try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch {} }
-  setTimeout(() => { if (child.exitCode === null) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} } }, 3000).unref();
+  setTimeout(() => {
+    if (run.done) return;
+    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+    try { child.kill('SIGKILL'); } catch {}
+  }, 3000).unref();
 }
 
 function readJson(req) {
   return new Promise((ok, bad) => {
-    let b = '', n = 0, dead = false;
+    const chunks = []; let n = 0, dead = false;
     req.on('data', c => {
       if (dead) return;
       n += c.length;
-      if (n > MAX_JSON) { dead = true; b = ''; bad(Object.assign(new Error('body too large'), { status: 413 })); return; }
-      b += c;
+      if (n > MAX_JSON) { dead = true; chunks.length = 0; bad(Object.assign(new Error('body too large'), { status: 413 })); return; }
+      chunks.push(c); // keep raw bytes: decoding per chunk would split multibyte (e.g. Korean) characters
     });
-    req.on('end', () => { if (dead) return; try { ok(JSON.parse(b || '{}')); } catch (e) { bad(e); } });
+    req.on('end', () => { if (dead) return; try { ok(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { bad(e); } });
     req.on('error', bad);
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const token = fs.readFileSync(path.join(os.homedir(), '.claude-droid-token'), 'utf8').trim();
   if (!token) { console.error('empty ~/.claude-droid-token'); process.exit(1); }
   const port = Number(process.env.BRIDGE_PORT) || 8765;

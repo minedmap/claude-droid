@@ -39,6 +39,9 @@ import java.util.UUID
 
 private class RunPost(val prompt: String, val claudeId: String?, val model: String?, val effort: String?)
 
+/** The session row was deleted while its run was still streaming (message insert hit the FK). */
+private class SessionGone : Exception("session deleted")
+
 /**
  * Owns chat execution: SSE collection, reconnect, Room writes. Runs as a foreground service so the
  * run survives the activity going to background. UI observes [ChatRuns]. All state below is touched
@@ -200,7 +203,12 @@ class ChatService : Service() {
   // ---- run ----
 
   private suspend fun addMsg(sid: Long, role: String, text: String) {
-    dao.insert(MessageEntity(sessionId = sid, role = role, text = text, ts = System.currentTimeMillis()))
+    try {
+      dao.insert(MessageEntity(sessionId = sid, role = role, text = text, ts = System.currentTimeMillis()))
+    } catch (e: android.database.sqlite.SQLiteConstraintException) {
+      // FK to SessionEntity failed: the user deleted this session mid-run
+      throw SessionGone()
+    }
   }
 
   /** [text] != null: new run (POST /chat). Otherwise reattach to [resumeReq] from event [resumeFrom]. */
@@ -237,6 +245,7 @@ class ChatService : Service() {
           RunPost(text, rc.claudeId, sess?.model, sess?.effort)
         } else null
         rc.stream(cur, from, post)
+        if (rc.gone) break
         if (rc.noConv && sid !in stopped) {
           retriedFresh = true
           rc.noConv = false
@@ -248,8 +257,9 @@ class ChatService : Service() {
         }
         break
       }
-      rc.addFiles(rc.toolPaths.toList()); rc.toolPaths.clear()
-      clearActive = !rc.networkFail
+      if (!rc.gone) { rc.addFiles(rc.toolPaths.toList()); rc.toolPaths.clear() }
+      // a deleted session has nothing to reattach to; a network failure keeps the pointer for later reattach
+      clearActive = rc.gone || !rc.networkFail
     } catch (e: CancellationException) {
       throw e
     } catch (e: Exception) {
@@ -271,6 +281,8 @@ class ChatService : Service() {
     var retryable = false
     var noConv = false
     var networkFail = false
+    /** session deleted while running: stop quietly, never report it as a bridge failure */
+    var gone = false
     private var lastId = -1
     private var done = false
     private var aborted = false
@@ -332,11 +344,16 @@ class ChatService : Service() {
           ChatRuns.bridgeUp.value = true
         } catch (e: CancellationException) {
           throw e
+        } catch (e: SessionGone) {
+          // the session row is gone: nothing can be recorded any more, so also stop the run on the bridge
+          gone = true; aborted = true
+          runCatching { client.cancel(rid) }
         } catch (e: BridgeHttpException) {
           // HTTP answers (4xx incl.) mean the bridge is up: never flip bridgeUp to false here
           if (e.code >= 500 && !usePost) transient(e.message)
           else fatal(if (usePost) (e.message ?: "HTTP ${e.code}") else "재연결 실패: ${e.message}", false)
-        } catch (e: Exception) {
+        } catch (e: IOException) {
+          // only transport errors count as "bridge down" / reconnectable; anything else (DB, bugs) is an internal error
           if (usePost && !gotMsg) fatal("브리지 연결 실패: ${e.message ?: e.javaClass.simpleName}", true)
           else transient(e.message ?: e.javaClass.simpleName)
         }

@@ -41,7 +41,11 @@ class BridgeClient(private val base: String, private val token: String) {
   private val json = "application/json".toMediaType()
 
   companion object {
+    /** No read timeout: SSE streams and large transfers. */
     private val SHARED: OkHttpClient by lazy { OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build() }
+    /** Same pool/dispatcher, bounded read timeout: short calls must never hang forever on a wedged bridge
+     *  (health is polled under a mutex in BridgeAutoStart; /adb runs `adb devices` with a 5 s timeout). */
+    private val SHORT: OkHttpClient by lazy { SHARED.newBuilder().readTimeout(20, TimeUnit.SECONDS).build() }
     const val MAX_UPLOAD = 50L * 1024 * 1024
     /** Always reads current prefs, so URL/token changes in Settings take effect. */
     fun of(p: dev.minedmap.claudedroid.data.Prefs) = BridgeClient(p.bridgeUrl, p.token)
@@ -49,14 +53,14 @@ class BridgeClient(private val base: String, private val token: String) {
 
   suspend fun health(): Boolean = withContext(Dispatchers.IO) {
     runCatching {
-      http.newCall(Request.Builder().url("$base/health").header("X-Token", token).build()).execute().use { it.isSuccessful }
+      SHORT.newCall(Request.Builder().url("$base/health").header("X-Token", token).build()).execute().use { it.isSuccessful }
     }.getOrDefault(false)
   }
 
   /** null = 브리지 응답 없음 */
   suspend fun adbConnected(): Boolean? = withContext(Dispatchers.IO) {
     runCatching {
-      http.newCall(Request.Builder().url("$base/adb").header("X-Token", token).build()).execute().use {
+      SHORT.newCall(Request.Builder().url("$base/adb").header("X-Token", token).build()).execute().use {
         if (!it.isSuccessful) null else JSONObject(it.body!!.string()).optBoolean("connected", false)
       }
     }.getOrNull()
@@ -96,7 +100,7 @@ class BridgeClient(private val base: String, private val token: String) {
   /** GET /runs; null when the bridge is unreachable or answers non-2xx. */
   suspend fun runs(): List<RunInfo>? = withContext(Dispatchers.IO) {
     runCatching {
-      http.newCall(Request.Builder().url("$base/runs").header("X-Token", token).build()).execute().use { r ->
+      SHORT.newCall(Request.Builder().url("$base/runs").header("X-Token", token).build()).execute().use { r ->
         if (!r.isSuccessful) return@use null
         val a = JSONObject(r.body!!.string()).optJSONArray("runs") ?: return@use emptyList<RunInfo>()
         (0 until a.length()).mapNotNull { i ->
@@ -110,7 +114,7 @@ class BridgeClient(private val base: String, private val token: String) {
   /** GET /health with a human-readable verdict (Settings "연결 테스트"). */
   suspend fun testConnection(): ConnTest = withContext(Dispatchers.IO) {
     try {
-      http.newCall(Request.Builder().url("$base/health").header("X-Token", token).build()).execute().use { r ->
+      SHORT.newCall(Request.Builder().url("$base/health").header("X-Token", token).build()).execute().use { r ->
         when {
           r.isSuccessful -> ConnTest.Ok
           r.code == 401 -> ConnTest.BadToken
@@ -124,7 +128,7 @@ class BridgeClient(private val base: String, private val token: String) {
 
   suspend fun cancel(reqId: String) = withContext(Dispatchers.IO) {
     runCatching {
-      http.newCall(Request.Builder().url("$base/cancel").header("X-Token", token)
+      SHORT.newCall(Request.Builder().url("$base/cancel").header("X-Token", token)
         .post(JSONObject().put("reqId", reqId).toString().toRequestBody(json)).build()).execute().close()
     }
   }
@@ -149,7 +153,7 @@ class BridgeClient(private val base: String, private val token: String) {
   suspend fun stat(path: String): FileStat? = withContext(Dispatchers.IO) {
     runCatching {
       val url = "$base/stat".toHttpUrl().newBuilder().addQueryParameter("path", path).build()
-      http.newCall(Request.Builder().url(url).header("X-Token", token).build()).execute().use { r ->
+      SHORT.newCall(Request.Builder().url(url).header("X-Token", token).build()).execute().use { r ->
         if (!r.isSuccessful) return@use null
         val o = JSONObject(r.body!!.string())
         FileStat(o.getBoolean("exists"), o.getLong("size"), o.getBoolean("isDir"))

@@ -82,6 +82,11 @@ test('prompt > 128KB works', async () => {
   assert.equal(stdinOf(events[0]), big);
   assert.equal(events.at(-1).code, 0);
 });
+test('multibyte prompt > 128KB survives chunked body (no split UTF-8)', async () => {
+  const big = '한글 테스트 ✓ '.repeat(20000); // ~300KB, 3-byte chars cross 64KB chunk boundaries
+  const { events } = await chat({ prompt: big });
+  assert.equal(stdinOf(events[0]), big);
+});
 test('SSE ids are 0-based indexes', async () => {
   const { raw } = await chat({ prompt: 'yo' });
   assert.deepEqual(raw.map(e => e.id), raw.map((_, i) => i));
@@ -265,7 +270,7 @@ test('file > 50MB -> 413', async () => {
   fs.rmSync(f);
 });
 test('deny-list -> 403', async () => {
-  const names = ['.credentials.json', '.claude-droid-token', '.ssh/id_rsa', '.android/adbkey', '.android/adbkey.pub', 'k.pem', 'k.key', '.env', '.git-credentials', '.netrc'];
+  const names = ['.credentials.json', '.claude.json', '.claude-droid-token', '.ssh/id_rsa', '.android/adbkey', '.android/adbkey.pub', 'k.pem', 'k.key', '.env', '.git-credentials', '.netrc'];
   for (const n of names) {
     const f = path.join(work, n); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'secret');
     assert.equal((await getF(f)).status, 403, n);
