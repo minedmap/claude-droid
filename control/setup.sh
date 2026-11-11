@@ -74,4 +74,5 @@ cat <<EOF
   command: node
   args:    ["$MCP"]
 폰이 목록에 없으면: Claude Droid 앱 -> 폰 제어 (adb) 에서 무선 디버깅 페어링.
+한글/이모지 입력(선택): ADBKeyboard APK 설치 (adb install ADBKeyboard.apk) — https://github.com/senzhk/ADBKeyBoard
 EOF

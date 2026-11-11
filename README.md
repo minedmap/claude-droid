@@ -175,10 +175,16 @@ Phone control is separate from the Claude Code chat. It needs **no bridge and no
 2. Open the app -> phone icon (**폰 제어 (adb)**) and pair wireless debugging. This screen works with an empty token.
 3. `setup.sh` registers the server as `phone` in Claude Code (Termux and/or proot Ubuntu). For other clients add a stdio server: command `node`, args `["~/control/control-mcp.mjs"]` (the script prints the absolute path).
 
-- 11 tools: `screenshot`, `tap`, `long_press`, `swipe`, `type`, `key`, `ui_tree`, `open_app`, `list_apps`, `shell`, `device_info`.
+- 16 tools: `screenshot`, `ui_tree`, `tap_element`, `tap`, `long_press`, `swipe`, `scroll`, `type`, `key`, `open_app`, `open_url`, `wait_for`, `batch`, `list_apps`, `shell`, `device_info`.
+- Built for autonomous use: the server sends MCP instructions that tell the agent to operate the phone itself (observe, act, verify) and to stop only for lock screens, logins and irreversible actions.
+  - `tap_element` taps by text/desc/id, so the agent needs no coordinates.
+  - `wait_for` waits for an element to appear or disappear.
+  - `batch` runs many steps in one call.
+  - Any action accepts `observe: "ui" | "screenshot"`, which returns the resulting screen in the same call.
+- The screen is woken automatically before acting (`CONTROL_AUTO_WAKE=0` turns this off). If the device is gone (for example after the wireless debugging port changes), the server re-discovers it over mDNS and reconnects (`CONTROL_AUTO_CONNECT=0` turns this off).
 - Zero dependencies. If ImageMagick is installed, screenshots are downsized to 1280 px (`CONTROL_MAX_SIDE`); all coordinates are in screenshot pixels and are scaled back to device pixels by the server.
-- `ADB_SERIAL` picks a device, `ADB_BIN` picks the adb binary.
-- Limit: `type` is ASCII only (adb `input text`).
+- `ADB_SERIAL` picks a device, `ADB_BIN` picks the adb binary, `CONTROL_OBSERVE` sets the default `observe`, `CONTROL_SETTLE_MS` sets the wait before observing (default 700).
+- Non-ASCII text (Korean, emoji): install [ADBKeyboard](https://github.com/senzhk/ADBKeyBoard) once (`adb install ADBKeyboard.apk`). `type` switches to it only while typing, then restores your keyboard. Without it, `type` is ASCII only (adb `input text`).
 
 ## USB host control (v0.6)
 

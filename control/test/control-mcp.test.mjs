@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createControlMcp, TOOLS, parseDevices, parseUiTree, pngSize } from '../control-mcp.mjs';
+import { createControlMcp, TOOLS, INSTRUCTIONS, parseDevices, parseMdns, parseUiTree, findElements, pngSize } from '../control-mcp.mjs';
 
 const script = fileURLToPath(new URL('../control-mcp.mjs', import.meta.url));
 const fakeAdb = fileURLToPath(new URL('./fake-adb.sh', import.meta.url));
@@ -27,9 +27,10 @@ function fake({ devices = 'List of devices attached\nlocalhost:40123\tdevice\n\n
   const exec = async (bin, args, opts = {}) => {
     calls.push({ bin, args, opts });
     const out = s => ({ stdout: Buffer.isBuffer(s) ? s : Buffer.from(s), stderr: '' });
+    if (over.adb) { const r = over.adb(args); if (r instanceof Error) throw r; if (r !== undefined) return out(r); }
     if (bin === 'magick') { if (!magick) throw Object.assign(new Error('nope'), { code: 'ENOENT' }); return out(args[0] === '-version' ? 'Version: ImageMagick 7' : 'JPEGDATA'); }
     if (bin === 'convert') throw Object.assign(new Error('nope'), { code: 'ENOENT' });
-    if (args[0] === 'devices') return out(devices);
+    if (args[0] === 'devices') return out(typeof devices === 'function' ? devices() : devices);
     const rest = args.slice(2);   // after -s <serial>
     if (rest[0] === 'exec-out' && rest[1] === 'screencap') return out(png(1080, 2400));
     if (rest[0] === 'exec-out' && rest[1] === 'uiautomator') return out(over.uiautomator ?? XML);
@@ -38,14 +39,15 @@ function fake({ devices = 'List of devices attached\nlocalhost:40123\tdevice\n\n
       for (const [k, v] of Object.entries(over.shell || {})) if (cmd.startsWith(k)) { if (v instanceof Error) throw v; return out(v); }
       if (cmd === 'wm size') return out('Physical size: 1080x2400\n');
       if (cmd.startsWith('pm list packages')) return out('package:org.b\npackage:com.a\n');
-      if (cmd.startsWith('getprop')) return out('samsung\nSM-S911N\n14\n34\n  mCurrentFocus=Window{abc u0 com.a/com.a.Main}\n');
+      if (cmd.startsWith('getprop')) return out('samsung\nSM-S911N\n14\n34\n  mCurrentFocus=Window{abc u0 com.a/com.a.Main}\nmWakefulness=Awake\n  level: 87\n');
       return out('');
     }
     throw new Error('unexpected: ' + bin + ' ' + args.join(' '));
   };
   return { exec, calls, shells: () => calls.filter(c => c.args[2] === 'shell').map(c => c.args[3]) };
 }
-const mk = (f, env = {}) => createControlMcp({ exec: f.exec, env });
+const mk = (f, env = {}, clock = { t: 0 }) => createControlMcp({ exec: f.exec, env: { CONTROL_AUTO_WAKE: '0', ...env },
+  now: () => clock.t, sleep: async d => { clock.t += d; (clock.sleeps ||= []).push(d); } });
 const text = r => JSON.parse(r.result.content.find(c => c.type === 'text').text);
 
 test('initialize + tools/list', async () => {
@@ -53,11 +55,15 @@ test('initialize + tools/list', async () => {
   const i = await m.handle(rpc('initialize', { protocolVersion: '2025-03-26' }));
   assert.equal(i.result.protocolVersion, '2025-03-26');
   assert.equal(i.result.serverInfo.name, 'droid-control');
+  assert.equal(i.result.instructions, INSTRUCTIONS); assert.match(INSTRUCTIONS, /autonomously/);
   const l = await m.handle(rpc('tools/list'));
   assert.deepEqual(l.result.tools.map(t => t.name).sort(),
-    ['device_info', 'key', 'list_apps', 'long_press', 'open_app', 'screenshot', 'shell', 'swipe', 'tap', 'type', 'ui_tree']);
-  for (const t of l.result.tools) { assert.equal(t.inputSchema.type, 'object'); assert.ok(t.description); }
-  assert.equal(Object.keys(TOOLS).length, 11);
+    ['batch', 'device_info', 'key', 'list_apps', 'long_press', 'open_app', 'open_url', 'screenshot', 'scroll', 'shell', 'swipe', 'tap', 'tap_element', 'type', 'ui_tree', 'wait_for']);
+  for (const t of l.result.tools) {
+    assert.equal(t.inputSchema.type, 'object'); assert.ok(t.description);
+    assert.equal('observe' in t.inputSchema.properties, !!TOOLS[t.name].action, t.name);
+  }
+  assert.equal(Object.keys(TOOLS).length, 16);
 });
 
 test('notifications get no response; unknown method and tool are errors', async () => {
@@ -141,7 +147,7 @@ test('open_app / list_apps / device_info', async () => {
   assert.ok(f.shells().includes('pm list packages -3'));
   const d = await m.call('device_info', {});
   assert.deepEqual(d, { serial: 'localhost:40123', manufacturer: 'samsung', model: 'SM-S911N', android: '14', sdk: 34,
-    screen: { width: 1080, height: 2400 }, scale: 1, focus: 'com.a/com.a.Main' });
+    screen: { width: 1080, height: 2400 }, scale: 1, screenOn: true, battery: 87, focus: 'com.a/com.a.Main' });
 });
 
 test('shell returns output and non-zero exit codes instead of failing', async () => {
@@ -155,7 +161,7 @@ test('errors: missing args, bad coordinates, no device, ADB_SERIAL, adb missing'
   const m = mk(fake());
   await assert.rejects(m.call('tap', { x: 1 }), /missing argument: y/);
   await assert.rejects(m.call('tap', { x: 'a', y: 1 }), /invalid x/);
-  const none = mk(fake({ devices: 'List of devices attached\nlocalhost:1\toffline\n' }));
+  const none = mk(fake({ devices: 'List of devices attached\nlocalhost:1\toffline\n' }), { CONTROL_AUTO_CONNECT: '0' });
   const r = await none.handle(rpc('tools/call', { name: 'tap', arguments: { x: 1, y: 1 } }));
   assert.equal(r.result.isError, true);
   assert.match(r.result.content[0].text, /no adb device connected \(seen: localhost:1 offline\)/);
@@ -190,4 +196,141 @@ test('stdio: real process against a fake adb binary', async () => {
   assert.equal(by(null).error.code, -32700);
   assert.deepEqual(JSON.parse(by(2).result.content[0].text), { ok: true, keycode: 3 });
   assert.deepEqual(JSON.parse(by(3).result.content[0].text), { exitCode: 3, output: 'fake: exit 3\n' });
+});
+
+test('tap_element: exact before substring, clickable preferred, index, id, long, no match lists labels', async () => {
+  const xml = `<hierarchy>
+<node text="Wi-Fi settings" resource-id="a:id/sub" clickable="false" bounds="[0,0][100,100]" />
+<node text="Wi-Fi" resource-id="a:id/title" clickable="false" bounds="[0,100][100,200]" />
+<node text="wi-fi" content-desc="" resource-id="a:id/row" clickable="true" bounds="[0,200][100,300]" />
+<node text="" resource-id="a:id/toggle" clickable="false" bounds="[200,200][300,300]" />
+</hierarchy>`;
+  const f = fake({ over: { uiautomator: xml } }); const m = mk(f);
+  const r = await m.call('tap_element', { text: 'WI-FI' });
+  assert.deepEqual(r.element.center, [50, 250]); assert.equal(r.matches, 3);
+  await m.call('tap_element', { text: 'wi-fi', index: 2 });
+  await m.call('tap_element', { id: 'a:id/toggle', long: true });
+  assert.deepEqual(f.shells(), ['input tap 50 250', 'input tap 50 50', 'input swipe 250 250 250 250 800']);
+  assert.equal((await m.call('tap_element', { text: 'wi-fi', exact: true })).matches, 2);
+  await assert.rejects(m.call('tap_element', { text: 'Bluetooth' }), /no element matching text "Bluetooth"; visible: \["Wi-Fi settings","Wi-Fi","wi-fi"\]/);
+  await assert.rejects(m.call('tap_element', {}), /give text and\/or id/);
+  assert.deepEqual(findElements([{ text: 'a', id: 'x' }, { text: 'a', id: 'y' }], { text: 'a', id: 'y' }), [{ text: 'a', id: 'y' }]);
+});
+
+test('observe: action returns the new screen after settling; default from CONTROL_OBSERVE; invalid mode rejected before acting', async () => {
+  const f = fake(), clock = { t: 0 }; const m = mk(f, {}, clock);
+  const r = await m.handle(rpc('tools/call', { name: 'tap', arguments: { x: 1, y: 2, observe: 'ui', settleMs: 250 } }));
+  assert.deepEqual(JSON.parse(r.result.content[0].text), { ok: true });
+  assert.equal(JSON.parse(r.result.content[1].text).screen.count, 2);
+  assert.deepEqual(clock.sleeps, [250]);
+  const s = await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('key', { key: 'back' });
+  assert.equal(s.content[1].type, 'image');
+  assert.equal((await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('ui_tree', {})).count, 2);   // non-actions never observe
+  const f2 = fake();
+  await assert.rejects(mk(f2).call('tap', { x: 1, y: 1, observe: 'video' }), /invalid observe/);
+  assert.deepEqual(f2.shells(), []);
+});
+
+test('scroll: direction maps to the opposite finger motion, honours rotation and a custom center', async () => {
+  const f = fake(); const m = mk(f);
+  await m.call('scroll', { direction: 'down' });
+  await m.call('scroll', { direction: 'up', amount: 0.2 });
+  await m.call('scroll', { direction: 'right', x: 100, y: 500 });
+  assert.deepEqual(f.shells().filter(s => s.startsWith('input')),
+    ['input swipe 540 1800 540 600 350', 'input swipe 540 960 540 1440 350', 'input swipe 370 500 1 500 350']);
+  const r = fake({ over: { shell: { 'dumpsys input': '    SurfaceOrientation: 1\n' } } });
+  await mk(r).call('scroll', { direction: 'left' });
+  assert.ok(r.shells().includes('input swipe 600 540 1800 540 350'));
+  await assert.rejects(m.call('scroll', { direction: 'sideways' }), /invalid direction/);
+});
+
+test('wait_for: polls until present / gone, times out with what is visible', async () => {
+  let n = 0;
+  const later = `<hierarchy><node text="Done" bounds="[0,0][10,10]" /></hierarchy>`;
+  const clock = { t: 0 };
+  const f = fake({ over: { adb: a => a[3] === 'uiautomator' ? (++n >= 3 ? later : XML) : undefined } });
+  const r = await mk(f, {}, clock).call('wait_for', { text: 'done' });
+  assert.equal(r.element.text, 'Done'); assert.equal(r.waitedMs, 800); assert.equal(n, 3);
+  assert.equal((await mk(fake(), {}, { t: 0 }).call('wait_for', { text: 'Jerry', gone: true, timeoutMs: 0 }).catch(e => e.message)).startsWith('timeout after 0ms waiting for text "Jerry" to disappear'), true);
+  assert.deepEqual(await mk(fake()).call('wait_for', { id: 'nothing', gone: true }), { ok: true, waitedMs: 0 });
+});
+
+test('type: non-ASCII goes through ADBKeyboard and restores the previous IME; clear; missing ADBKeyboard is explained', async () => {
+  const f = fake({ over: { shell: { 'pm list packages com.android.adbkeyboard': 'package:com.android.adbkeyboard\n' } } }); const m = mk(f);
+  await m.call('type', { text: '안녕\nhi 😀', clear: true });
+  const [clear, , cmd] = f.shells();
+  assert.match(clear, /^input keycombination 113 29 .*input keyevent 123 67 67/);
+  const b64 = s => Buffer.from(s).toString('base64');
+  assert.ok(cmd.includes(`ime set com.android.adbkeyboard/.AdbIME`));
+  assert.ok(cmd.includes(`am broadcast -a ADB_INPUT_B64 --es msg ${b64('안녕')} >/dev/null; input keyevent 66; am broadcast -a ADB_INPUT_B64 --es msg ${b64('hi 😀')}`));
+  assert.match(cmd, /ime set "\$prev"/);
+  await assert.rejects(mk(fake()).call('type', { text: '한글' }), /ADBKeyboard/);
+});
+
+test('open_url builds an ACTION_VIEW intent and surfaces resolve errors', async () => {
+  const f = fake(); const m = mk(f);
+  await m.call('open_url', { url: "https://example.com/?q=it's", package: 'com.android.chrome' });
+  assert.deepEqual(f.shells(), [`am start -W -a android.intent.action.VIEW -d 'https://example.com/?q=it'\\''s' -p com.android.chrome 2>&1`]);
+  await assert.rejects(m.call('open_url', { url: 'a\nb' }), /invalid url/);
+  await assert.rejects(m.call('open_url', { url: 'x:', package: 'a;b' }), /invalid package/);
+  const bad = mk(fake({ over: { shell: { 'am start': 'Error: Activity not started, unable to resolve Intent\n' } } }));
+  await assert.rejects(bad.call('open_url', { url: 'nope://x' }), /unable to resolve/);
+});
+
+test('batch: runs steps in order, sleep steps, stops at the first failure unless continueOnError, collects images', async () => {
+  const f = fake(), clock = { t: 0 }; const m = mk(f, {}, clock);
+  const r = await m.handle(rpc('tools/call', { name: 'batch', arguments: { steps: [
+    { tool: 'key', args: { key: 'home' } }, { tool: 'sleep', args: { ms: 300 } }, { tool: 'screenshot' },
+    { tool: 'tap', args: { x: 1 } }, { tool: 'key', args: { key: 'back' } }] } }));
+  assert.equal(r.result.isError, true);
+  const sum = JSON.parse(r.result.content[0].text);
+  assert.equal(sum.completed, 3); assert.equal(sum.total, 5);
+  assert.deepEqual(sum.results[0], { step: 0, tool: 'key', result: { ok: true, keycode: 3 } });
+  assert.equal(sum.results[2].result.width, 1080);
+  assert.match(sum.results[3].error, /missing argument: y/);
+  assert.equal(r.result.content[1].type, 'image');
+  assert.deepEqual(clock.sleeps, [300]);
+  assert.deepEqual(f.shells(), ['input keyevent 3']);
+  const g = fake();
+  const c = await mk(g).call('batch', { continueOnError: true, observe: 'ui', steps: [{ tool: 'batch' }, { tool: 'key', args: { key: 'back' } }] });
+  assert.equal(c.isError, true);   // errors are not hidden by the final observe
+  assert.deepEqual(g.shells(), ['input keyevent 4']);
+  const ok = await mk(fake()).call('batch', { observe: 'ui', steps: [{ tool: 'key', args: { key: 'back' } }] });
+  assert.equal(JSON.parse(ok.content.at(-1).text).screen.count, 2);
+  await assert.rejects(m.call('batch', { steps: [] }), /non-empty/);
+});
+
+test('auto-wake: wakes once, rechecks after 3 s, skips power keys and resets after them', async () => {
+  const clock = { t: 0 };
+  const f = fake({ over: { shell: { 'dumpsys power': 'woke\n' } } }); const m = mk(f, { CONTROL_AUTO_WAKE: '1' }, clock);
+  await m.call('tap', { x: 1, y: 1 }); await m.call('tap', { x: 2, y: 2 });
+  clock.t += 5000; await m.call('screenshot', {});
+  await m.call('key', { key: 'power' }); await m.call('key', { key: 'back' });
+  const wakes = f.shells().map(s => s.startsWith('dumpsys power') ? 'W' : s);
+  assert.deepEqual(wakes, ['W', 'input tap 1 1', 'input tap 2 2', 'W', 'input keyevent 26', 'W', 'input keyevent 4']);
+  const off = fake(); await mk(off, { CONTROL_AUTO_WAKE: '0' }).call('tap', { x: 1, y: 1 });
+  assert.deepEqual(off.shells(), ['input tap 1 1']);
+});
+
+test('auto-connect: no device -> mDNS discovery + adb connect, then retries; dropped device is reconnected once', async () => {
+  let connected = false;
+  const f = fake({
+    devices: () => connected ? 'List of devices attached\n192.168.0.5:41234\tdevice\n' : 'List of devices attached\n',
+    over: { adb: a => {
+      if (a[0] === 'mdns') return 'List of discovered mdns services\nadb-R5CT-xyz\t_adb-tls-connect._tcp\t192.168.0.5:41234\nadb-R5CT-xyz\t_adb-tls-pairing._tcp\t192.168.0.5:39999\n';
+      if (a[0] === 'reconnect') return '';
+      if (a[0] === 'connect') { connected = true; return `connected to ${a[1]}`; }
+    } },
+  });
+  await mk(f).call('key', { key: 'back' });
+  assert.deepEqual(f.calls.filter(c => c.bin === 'adb' && c.args[0] !== 'devices').map(c => c.args.join(' ')),
+    ['mdns services', 'reconnect offline', 'connect 192.168.0.5:41234', '-s 192.168.0.5:41234 shell input keyevent 4']);
+
+  let drops = 1;
+  const offline = Object.assign(new Error('Command failed'), { code: 1, stderr: "error: device 'localhost:5555' not found" });
+  const g = fake({ over: { adb: a => a[0] === '-s' && a[2] === 'shell' && drops-- > 0 ? offline : a[0] === 'connect' || a[0] === 'reconnect' || a[0] === 'mdns' ? '' : undefined } });
+  await mk(g, { ADB_SERIAL: 'localhost:5555' }).call('key', { key: 'home' });
+  assert.deepEqual(g.calls.map(c => c.args.join(' ')),
+    ['-s localhost:5555 shell input keyevent 3', 'mdns services', 'reconnect offline', 'connect localhost:5555', '-s localhost:5555 shell input keyevent 3']);
+  assert.deepEqual(parseMdns('x\t_adb-tls-connect._tcp\t10.0.0.2:5555\nbad line _adb-tls-connect'), ['10.0.0.2:5555']);
 });

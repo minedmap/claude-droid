@@ -162,10 +162,16 @@ proot-distro login ubuntu -- /root/.local/bin/claude mcp list
 2. 앱 -> 폰 아이콘(**폰 제어 (adb)**)에서 무선 디버깅을 페어링합니다. 토큰이 비어 있어도 동작합니다.
 3. `setup.sh`가 Claude Code(Termux, proot Ubuntu)에 `phone`으로 등록합니다. 다른 클라이언트는 stdio 서버로 직접 등록하세요: command `node`, args `["~/control/control-mcp.mjs"]` (스크립트가 절대 경로를 출력합니다).
 
-- 도구 11개: `screenshot`, `tap`, `long_press`, `swipe`, `type`, `key`, `ui_tree`, `open_app`, `list_apps`, `shell`, `device_info`.
+- 도구 16개: `screenshot`, `ui_tree`, `tap_element`, `tap`, `long_press`, `swipe`, `scroll`, `type`, `key`, `open_app`, `open_url`, `wait_for`, `batch`, `list_apps`, `shell`, `device_info`.
+- 자율 조작용으로 설계했습니다. 서버가 MCP instructions로 에이전트에게 폰을 직접 조작하도록(관찰 → 실행 → 확인) 안내하고, 잠금 화면, 로그인, 되돌릴 수 없는 작업에서만 멈추게 합니다.
+  - `tap_element`: 텍스트/설명/id로 탭하므로 좌표가 필요 없습니다.
+  - `wait_for`: 요소가 나타나거나 사라질 때까지 기다립니다.
+  - `batch`: 여러 단계를 한 번에 실행합니다.
+  - 모든 동작 도구에 `observe: "ui" | "screenshot"`를 주면 결과 화면을 같은 호출에서 돌려받습니다.
+- 동작 전에 화면을 자동으로 켭니다(`CONTROL_AUTO_WAKE=0`이면 끔). 기기 연결이 끊기면(무선 디버깅 포트 변경 등) mDNS로 다시 찾아 재연결합니다(`CONTROL_AUTO_CONNECT=0`이면 끔).
 - 의존성 없음. ImageMagick이 있으면 스크린샷을 1280px로 줄입니다(`CONTROL_MAX_SIDE`). 모든 좌표는 스크린샷 픽셀 기준이며 서버가 기기 픽셀로 환산합니다.
-- `ADB_SERIAL`로 기기, `ADB_BIN`으로 adb 바이너리를 지정합니다.
-- 제한: `type`은 ASCII만 입력됩니다(adb `input text`). 한글 입력은 아직 지원하지 않습니다.
+- `ADB_SERIAL`은 기기, `ADB_BIN`은 adb 바이너리, `CONTROL_OBSERVE`는 기본 `observe`, `CONTROL_SETTLE_MS`는 관찰 전 대기 시간(기본 700)을 지정합니다.
+- 한글/이모지 입력: [ADBKeyboard](https://github.com/senzhk/ADBKeyBoard)를 한 번 설치하세요(`adb install ADBKeyboard.apk`). `type`이 입력하는 동안에만 키보드를 바꾸고, 끝나면 원래 키보드로 돌려놓습니다. 없으면 ASCII만 입력됩니다.
 
 ## USB 호스트 제어 (v0.6)
 
