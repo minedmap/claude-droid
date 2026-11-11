@@ -334,3 +334,16 @@ test('auto-connect: no device -> mDNS discovery + adb connect, then retries; dro
     ['-s localhost:5555 shell input keyevent 3', 'mdns services', 'reconnect offline', 'connect localhost:5555', '-s localhost:5555 shell input keyevent 3']);
   assert.deepEqual(parseMdns('x\t_adb-tls-connect._tcp\t10.0.0.2:5555\nbad line _adb-tls-connect'), ['10.0.0.2:5555']);
 });
+
+test('ui dumps: uiautomator errors are reported, retried once, and wait_for keeps polling through them', async () => {
+  const idle = 'ERROR: could not get idle state.\n';
+  const bad = fake({ over: { uiautomator: idle, shell: { 'uiautomator dump': idle } } });
+  await assert.rejects(mk(bad).call('ui_tree', {}), /uiautomator dump failed: ERROR: could not get idle state\./);
+  assert.equal(bad.calls.filter(c => c.args[3] === 'uiautomator').length, 2);   // retried once
+  let n = 0;
+  const flaky = fake({ over: { adb: a => a[3] === 'uiautomator' ? (++n <= 2 ? idle : XML) : a[2] === 'shell' && a[3].startsWith('uiautomator dump') ? idle : undefined } });
+  const r = await mk(flaky, {}, { t: 0 }).call('wait_for', { text: 'jerry' });
+  assert.equal(r.element.text, 'Tom & Jerry'); assert.equal(n, 3);
+  const never = fake({ over: { uiautomator: idle, shell: { 'uiautomator dump': idle } } });
+  await assert.rejects(mk(never, {}, { t: 0 }).call('wait_for', { text: 'x', gone: true, timeoutMs: 1000 }), /timeout after 1000ms .*last uiautomator dump failed: ERROR: could not get idle state/);
+});

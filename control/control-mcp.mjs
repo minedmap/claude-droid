@@ -272,16 +272,30 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   }
   const ms = (v, def, max) => { const n = Number(v ?? def); if (!Number.isFinite(n) || n < 0) throw new Error(`invalid duration: ${v}`); return Math.min(Math.round(n), max); };
 
-  async function uiNodes(all) {
-    let xml = '';
-    try { xml = String((await adb(['exec-out', 'uiautomator', 'dump', '/dev/tty'], { timeout: 30000 })).stdout); } catch {}
+  /** One uiautomator dump. Fails with uiautomator's own message (e.g. "could not get idle state" on a screen that never stops updating). */
+  async function dumpOnce(all) {
+    let xml = '', why = '';
+    try { xml = String((await adb(['exec-out', 'uiautomator', 'dump', '/dev/tty'], { timeout: 30000 })).stdout); } catch (e) { why = String(e?.message || e); }
     if (!xml.includes('<hierarchy')) {
+      if (xml.trim()) why = xml.trim();
       const f = '/data/local/tmp/droid-control-ui.xml';
-      xml = await sh(`uiautomator dump ${f} >/dev/null && cat ${f}; rm -f ${f}`, { timeout: 30000 });
+      xml = await sh(`uiautomator dump ${f} 2>&1 | grep -v 'dumped to'; cat ${f} 2>/dev/null; rm -f ${f}`, { timeout: 30000 });
     }
-    if (!xml.includes('<hierarchy')) throw new Error('uiautomator dump failed: ' + xml.trim().slice(0, 200));
+    if (!xml.includes('<hierarchy')) {
+      throw new Error(`uiautomator dump failed: ${(xml.trim() || why || 'no output').slice(0, 300)} (busy or constantly updating screens can do this; screenshot still works)`);
+    }
     const s = await scale();
     return { scale: s, nodes: parseUiTree(xml, { scale: s, all }) };
+  }
+
+  /** dumpOnce with retries: a dump often fails once while the screen is still settling. */
+  async function uiNodes(all, retries = 1) {
+    for (let i = 0; ; i++) {
+      try { return await dumpOnce(all); } catch (e) {
+        if (i >= retries || /not found|no adb device/.test(String(e?.message))) throw e;
+        await sleep(500);
+      }
+    }
   }
 
   const labels = nodes => [...new Set(nodes.flatMap(n => [n.text, n.desc]).filter(Boolean))].slice(0, 30);
@@ -401,11 +415,18 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     async wait_for(a) {
       findElements([], a);   // validates the query
       const timeout = ms(a.timeoutMs, 10000, 120000), start = now();
+      let nodes = [], dumpErr = null;
       for (;;) {
-        const { nodes } = await uiNodes(true);
-        const hits = findElements(nodes, a);
-        if (a.gone ? !hits.length : hits.length) return { ok: true, waitedMs: now() - start, ...(a.gone ? {} : { element: hits[0] }) };
-        if (now() - start >= timeout) throw new Error(`timeout after ${timeout}ms waiting for ${describeQuery(a)}${a.gone ? ' to disappear' : ''}; visible: ${JSON.stringify(labels(nodes))}`);
+        // a failed dump means "unknown", not "absent": keep polling until the deadline
+        try { ({ nodes } = await uiNodes(true, 0)); dumpErr = null; } catch (e) { dumpErr = e; }
+        if (!dumpErr) {
+          const hits = findElements(nodes, a);
+          if (a.gone ? !hits.length : hits.length) return { ok: true, waitedMs: now() - start, ...(a.gone ? {} : { element: hits[0] }) };
+        }
+        if (now() - start >= timeout) {
+          throw new Error(`timeout after ${timeout}ms waiting for ${describeQuery(a)}${a.gone ? ' to disappear' : ''}; `
+            + (dumpErr ? `last ${dumpErr.message}` : `visible: ${JSON.stringify(labels(nodes))}`));
+        }
         await sleep(400);
       }
     },
