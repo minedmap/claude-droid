@@ -521,7 +521,8 @@ function main() {
   const mcp = createControlMcp();
   const rl = readline.createInterface({ input: process.stdin });
   let pending = 0, ended = false;
-  const maybeExit = () => { if (ended && pending === 0) process.exit(0); };
+  // exit only after stdout has flushed: process.exit() right after a large write to a pipe truncates it
+  const maybeExit = () => { if (ended && pending === 0) process.stdout.write('', () => process.exit(0)); };
   rl.on('line', async line => {
     if (!line.trim()) return;
     pending++;
