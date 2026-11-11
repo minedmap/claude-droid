@@ -1,10 +1,9 @@
 // Adapted from RikkaApps/Shizuku (Apache-2.0): RemoteInput reply handling in AdbPairingService.kt
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.control
 import android.app.RemoteInput
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import dev.minedmap.claudedroid.data.Prefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
@@ -31,7 +30,7 @@ class PairingReceiver : BroadcastReceiver() {
         val cp = withTimeoutOrNull(10_000) { AdbMdns.connectPort.filterNotNull().first() }
         if (cp == null) { PairingNotification.show(app, "실패: 연결 포트 못 찾음"); return@launch }
         val c = shell.connect(cp)
-        if (c.isSuccess) { Prefs(app).apply { lastConnectPort = cp; paired = true }; PairingNotification.show(app, "연결됨", false) }
+        if (c.isSuccess) { ControlPrefs(app).apply { lastConnectPort = cp; paired = true }; PairingNotification.show(app, "연결됨", false) }
         else PairingNotification.show(app, "실패: ${c.exceptionOrNull()?.message}")
       } catch (e: Throwable) {
         try { PairingNotification.show(app, "오류: ${e.message}") } catch (_: Throwable) {}

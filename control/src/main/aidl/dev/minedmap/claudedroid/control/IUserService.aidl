@@ -1,4 +1,4 @@
-package dev.minedmap.claudedroid;
+package dev.minedmap.claudedroid.control;
 
 interface IUserService {
     void destroy() = 16777114;

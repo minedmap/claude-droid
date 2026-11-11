@@ -1,4 +1,4 @@
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.control
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent

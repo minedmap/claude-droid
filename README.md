@@ -8,7 +8,7 @@
 
 A native Android chat GUI for **Claude Code**, running entirely on your phone.
 Claude Code runs inside Termux (proot Ubuntu). A small local bridge streams its output to the app.
-With wireless debugging (adb) connected, Claude can operate the phone itself.
+Phone control over wireless debugging (adb) is a separate, standalone feature: any MCP client on the phone can use it, with or without the Claude Code chat.
 
 ## Features
 
@@ -20,7 +20,7 @@ With wireless debugging (adb) connected, Claude can operate the phone itself.
   - Upload files or clipboard images.
   - Claude-generated files show up as cards with previews: images, PDF first page, Markdown, JSON, and text. Images returned in tool results show inline.
   - Download a file to `Download/ClaudeDroid` or share it.
-- **Wireless debugging wizard**: pairing via a notification reply, mDNS port discovery, and Termux `RUN_COMMAND` integration. Optional **Shizuku** shell.
+- **Phone control (standalone)**: its own screen with a wireless debugging wizard (pairing via a notification reply, mDNS port discovery, Termux `RUN_COMMAND`, optional **Shizuku** shell) and a zero-dependency MCP server with computer-use style tools. Works without the chat bridge.
 - **Settings**: masked token field and a connection test.
 
 ## Architecture
@@ -51,8 +51,8 @@ The full order for a fresh device. Run the commands from the Installation sectio
 8. **Install the app** (`app-debug.apk` from [Releases](https://github.com/minedmap/claude-droid/releases/latest)).
    - Allow **notifications** on first launch (needed for background runs and pairing-code entry).
    - Settings → Apps → Claude Droid and Termux → Battery → **Unrestricted / don't optimize**, so long runs are not killed.
-9. **Paste the token in the app → connection wizard**: allow RUN_COMMAND, then pair wireless debugging.
-10. *(Optional)* Screen-control MCP: `bash ~/bridge/mcp-setup.sh`.
+9. **Paste the token in the app → connection wizard**: allow RUN_COMMAND. Wireless debugging is paired on the separate **폰 제어 (adb)** screen (optional).
+10. *(Optional)* Phone-control MCP: `bash ~/control/setup.sh`, then pair in the app under **폰 제어 (adb)**.
 11. *(Optional)* USB device control: `bash ~/claude-droid/usb-setup.sh`.
     - Some phones (some Samsung, Xiaomi, etc.) need an **OTG** toggle turned on in Settings.
     - Plug the device in with an OTG adapter/cable and allow Claude Droid in the permission popup (you can re-request it under app Settings → USB devices).
@@ -115,9 +115,9 @@ cat ~/.claude-droid-token
 
 **6) (Optional) Screen-control MCP**
 ```sh
-bash ~/bridge/mcp-setup.sh
+bash ~/control/setup.sh
 ```
-- Installs Node 22 and [claude-in-mobile](https://github.com/AlexGladkov/claude-in-mobile) inside Ubuntu and registers it as the `mobile` tool (screenshot, tap, swipe, UI tree).
+- Installs adb and Node, and registers `control/control-mcp.mjs` in Claude Code as the `phone` tool (screenshot, tap, swipe, type, UI tree). The old `mobile` (claude-in-mobile) registration is removed.
 - Copies Termux's adb key into Ubuntu, so no re-pairing. Success when `adb devices` lists the phone at the end.
 
 **7) (Optional) USB device control**
@@ -137,7 +137,7 @@ bash ~/claude-droid/usb-setup.sh
 ```sh
 proot-distro login ubuntu -- /root/.local/bin/claude mcp list
 ```
-- `mobile` and `usb` should be listed as `Connected`.
+- `phone` and `usb` should be listed as `Connected`.
 
 ## Installation
 
@@ -152,12 +152,33 @@ proot-distro login ubuntu -- /root/.local/bin/claude mcp list
    ```
    Copy the `TOKEN` printed at the end. This is the bridge token, **not** your Claude login. You can show it again with `cat ~/.claude-droid-token`.
    Re-running `install.sh` updates and restarts the bridge.
-   *(Optional)* To register the [claude-in-mobile](https://github.com/AlexGladkov/claude-in-mobile) screen-control MCP, run `bash bridge/mcp-setup.sh`.
+   *(Optional)* To register the phone-control MCP, run `bash control/setup.sh` (see [Phone control](#phone-control-standalone-any-mcp-client)).
 4. Install the APK from Releases. Paste the token in the app, then follow the connection wizard:
    1. Allow the `RUN_COMMAND` permission.
-   2. Pair wireless debugging, either through the notification reply or by entering the port and code manually.
+   2. *(Optional, for phone control)* Open **폰 제어 (adb)** and pair wireless debugging, either through the notification reply or by entering the port and code manually.
 
 **Custom port:** put `BRIDGE_PORT=9000` in `~/claude-droid/env`. The service script and `start.sh` both read it, and it survives reinstalls. Then change the bridge URL in the app settings.
+
+## Phone control (standalone, any MCP client)
+
+Phone control is separate from the Claude Code chat. It needs **no bridge and no token**, and works with any MCP client running in Termux (Claude Code, Codex CLI, Gemini CLI, ...).
+
+```
+[any MCP client] --stdio MCP--> control/control-mcp.mjs --adb (wireless debugging, localhost)--> phone
+[Claude Droid app -> Phone control (adb)] --RUN_COMMAND--> Termux adb pair/connect
+```
+
+1. Install Termux (F-Droid), then get the control package and run its setup. `bridge.zip` already contains `control/`, so chat users skip the download:
+   ```sh
+   cd ~ && curl -LO https://github.com/minedmap/claude-droid/releases/latest/download/control.zip && unzip -o control.zip && bash control/setup.sh
+   ```
+2. Open the app -> phone icon (**폰 제어 (adb)**) and pair wireless debugging. This screen works with an empty token.
+3. `setup.sh` registers the server as `phone` in Claude Code (Termux and/or proot Ubuntu). For other clients add a stdio server: command `node`, args `["~/control/control-mcp.mjs"]` (the script prints the absolute path).
+
+- 11 tools: `screenshot`, `tap`, `long_press`, `swipe`, `type`, `key`, `ui_tree`, `open_app`, `list_apps`, `shell`, `device_info`.
+- Zero dependencies. If ImageMagick is installed, screenshots are downsized to 1280 px (`CONTROL_MAX_SIDE`); all coordinates are in screenshot pixels and are scaled back to device pixels by the server.
+- `ADB_SERIAL` picks a device, `ADB_BIN` picks the adb binary.
+- Limit: `type` is ASCII only (adb `input text`).
 
 ## USB host control (v0.6)
 

@@ -3,7 +3,7 @@
 [English](README.md) | **한국어**
 
 Android에서 **Claude Code**를 채팅 GUI로 쓰는 앱. 세션 분리/재개, 모델·effort 선택, 무선 디버깅(adb) 연결 마법사 포함.
-Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
+폰 제어(adb)는 채팅과 분리된 독립 기능이라, Claude Code 없이도 폰의 모든 MCP 클라이언트가 쓸 수 있다.
 
 ## 구조
 ```
@@ -32,8 +32,8 @@ Claude가 adb shell 권한으로 폰을 직접 조작할 수 있다.
 8. **앱 APK 설치**: [Releases](https://github.com/minedmap/claude-droid/releases/latest)의 `app-debug.apk`.
    - 첫 실행 시 **알림 권한 허용**(백그라운드 실행, 페어링 코드 입력에 필요).
    - 설정 → 앱 → Claude Droid, Termux → 배터리 → **제한 없음/최적화 안 함**(긴 작업 중 종료 방지).
-9. **앱에서 토큰 붙여넣기 → 연결 마법사**: RUN_COMMAND 권한 허용 → 무선 디버깅 페어링.
-10. **(선택) 화면 조작 MCP**: `bash ~/bridge/mcp-setup.sh`.
+9. **앱에서 토큰 붙여넣기 → 연결 마법사**: RUN_COMMAND 권한 허용. 무선 디버깅 페어링은 **폰 제어 (adb)** 화면에서 합니다(선택).
+10. **(선택) 폰 제어 MCP**: `bash ~/control/setup.sh` 실행 후 앱의 **폰 제어 (adb)** 에서 페어링.
 11. **(선택) USB 장치 제어**: `bash ~/claude-droid/usb-setup.sh` 실행.
     - 일부 기기(삼성 일부, 샤오미 등)는 설정에서 **OTG** 항목을 따로 켜야 합니다.
     - OTG 젠더/케이블로 장치를 꽂고, 뜨는 권한 팝업에서 Claude Droid를 허용합니다(앱 설정 → USB 장치에서 다시 요청 가능).
@@ -96,9 +96,9 @@ cat ~/.claude-droid-token
 
 **6) (선택) 화면 조작 MCP 등록**
 ```sh
-bash ~/bridge/mcp-setup.sh
+bash ~/control/setup.sh
 ```
-- Ubuntu 안에 Node 22와 [claude-in-mobile](https://github.com/AlexGladkov/claude-in-mobile)을 설치하고 Claude에 `mobile` 도구로 등록합니다(스크린샷, 탭, 스와이프, UI 트리).
+- adb와 Node를 설치하고 `control/control-mcp.mjs`를 Claude Code에 `phone` 도구로 등록합니다(스크린샷, 탭, 스와이프, 입력, UI 트리). 기존 `mobile`(claude-in-mobile) 등록은 제거됩니다.
 - Termux의 adb 키를 Ubuntu로 복사해서, 무선 디버깅을 다시 페어링하지 않아도 됩니다. 마지막에 `adb devices`에 기기가 보이면 성공입니다.
 
 **7) (선택) USB 장치 제어 설정**
@@ -118,7 +118,7 @@ bash ~/claude-droid/usb-setup.sh
 ```sh
 proot-distro login ubuntu -- /root/.local/bin/claude mcp list
 ```
-- `mobile`, `usb`가 목록에 있고 `Connected`이면 Claude가 해당 도구를 쓸 수 있습니다.
+- `phone`, `usb`가 목록에 있고 `Connected`이면 Claude가 해당 도구를 쓸 수 있습니다.
 
 ## 설치
 1. F-Droid에서 **Termux**, **Termux:API** 설치. Termux에서 `pkg upgrade`.
@@ -132,7 +132,7 @@ proot-distro login ubuntu -- /root/.local/bin/claude mcp list
    cd ~ && curl -LO https://github.com/minedmap/claude-droid/releases/latest/download/bridge.zip && unzip -o bridge.zip && bash bridge/install.sh
    ```
    마지막에 출력되는 TOKEN을 복사.
-   (선택) 화면 조작 MCP [claude-in-mobile](https://github.com/AlexGladkov/claude-in-mobile) 등록: `bash bridge/mcp-setup.sh` (`termux-services` 첫 설치 시 Termux 완전 종료 후 재실행)
+   (선택) 폰 제어 MCP 등록: `bash control/setup.sh` (`termux-services` 첫 설치 시 Termux 완전 종료 후 재실행)
 4. 앱 APK 설치 → 설정에 토큰 붙여넣기 → 연결 마법사 순서대로.
    - RUN_COMMAND 권한 허용, 무선 디버깅 페어링(알림 입력 또는 수동 포트/코드 입력).
 
@@ -145,6 +145,27 @@ proot-distro login ubuntu -- /root/.local/bin/claude mcp list
 - `GET /runs` → `{runs:[{reqId,startedAt,done,code,events}]}`. `POST /cancel {reqId}`만 프로세스를 종료.
 - 잘못된 `model`/`effort` → 400 `{error:'invalid model'|'invalid effort'}`. 모든 4xx는 JSON `{error}`.
 - `/file`·`/stat`은 자격증명류(`.credentials.json`, `.ssh/`, `*.pem`, `*.key`, `.env` 등) 403.
+
+## 폰 제어 (독립 기능, 모든 MCP 클라이언트)
+
+폰 제어는 Claude Code 채팅과 분리된 기능입니다. **브리지와 토큰이 필요 없고**, Termux에서 도는 모든 MCP 클라이언트(Claude Code, Codex CLI, Gemini CLI 등)에서 쓸 수 있습니다.
+
+```
+[MCP 클라이언트] --stdio MCP--> control/control-mcp.mjs --adb (무선 디버깅 localhost)--> 폰
+[Claude Droid 앱 -> 폰 제어 (adb)] --RUN_COMMAND--> Termux adb pair/connect
+```
+
+1. Termux(F-Droid) 설치 후 control 패키지를 받아 설정을 실행합니다. `bridge.zip`에 `control/`이 들어 있으므로 채팅 사용자는 다운로드를 건너뜁니다.
+   ```sh
+   cd ~ && curl -LO https://github.com/minedmap/claude-droid/releases/latest/download/control.zip && unzip -o control.zip && bash control/setup.sh
+   ```
+2. 앱 -> 폰 아이콘(**폰 제어 (adb)**)에서 무선 디버깅을 페어링합니다. 토큰이 비어 있어도 동작합니다.
+3. `setup.sh`가 Claude Code(Termux, proot Ubuntu)에 `phone`으로 등록합니다. 다른 클라이언트는 stdio 서버로 직접 등록하세요: command `node`, args `["~/control/control-mcp.mjs"]` (스크립트가 절대 경로를 출력합니다).
+
+- 도구 11개: `screenshot`, `tap`, `long_press`, `swipe`, `type`, `key`, `ui_tree`, `open_app`, `list_apps`, `shell`, `device_info`.
+- 의존성 없음. ImageMagick이 있으면 스크린샷을 1280px로 줄입니다(`CONTROL_MAX_SIDE`). 모든 좌표는 스크린샷 픽셀 기준이며 서버가 기기 픽셀로 환산합니다.
+- `ADB_SERIAL`로 기기, `ADB_BIN`으로 adb 바이너리를 지정합니다.
+- 제한: `type`은 ASCII만 입력됩니다(adb `input text`). 한글 입력은 아직 지원하지 않습니다.
 
 ## USB 호스트 제어 (v0.6)
 

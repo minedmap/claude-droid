@@ -14,5 +14,6 @@ Include steps to reproduce, the affected version, and the impact.
 
 - The bridge listens on `127.0.0.1` only and requires the token in `~/.claude-droid-token`. Anyone with this token can run arbitrary commands through Claude Code.
 - `--dangerously-skip-permissions` is enabled by default. Claude can run commands without asking. With wireless debugging connected, that includes adb shell access to the device.
+- The phone-control MCP server (`control/control-mcp.mjs`) has no token: every MCP client it is registered in can see the screen, inject input and run `adb shell` commands (uid 2000) through its `shell` tool. Register it only in clients you trust.
 - `allow-external-apps=true` in Termux allows any app holding the `RUN_COMMAND` permission to run Termux commands.
 - `/file` and `/stat` are restricted to HOME, the Ubuntu rootfs, shared storage, and tmp. They return 403 for common credential files.

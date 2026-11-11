@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,7 +52,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun SessionListScreen(onOpen: (Long) -> Unit, onSettings: () -> Unit, onConnect: () -> Unit) {
+fun SessionListScreen(onOpen: (Long) -> Unit, onSettings: () -> Unit, onConnect: () -> Unit, onControl: () -> Unit) {
   val ctx = LocalContext.current
   val dao = remember { Db.get(ctx).dao() }
   val prefs = remember { Prefs(ctx) }
@@ -68,6 +69,7 @@ fun SessionListScreen(onOpen: (Long) -> Unit, onSettings: () -> Unit, onConnect:
   Scaffold(
     topBar = {
       TopAppBar(title = { Text("Claude Droid") }, actions = {
+        IconButton(onClick = onControl) { Icon(Icons.Filled.PhoneAndroid, "폰 제어") }
         IconButton(onClick = onConnect) { Icon(Icons.Filled.Wifi, "연결") }
         IconButton(onClick = onSettings) { Icon(Icons.Filled.Settings, "설정") }
       })

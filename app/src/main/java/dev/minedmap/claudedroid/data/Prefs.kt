@@ -1,9 +1,10 @@
 package dev.minedmap.claudedroid.data
 import android.content.Context
+import dev.minedmap.claudedroid.core.termux.TermuxRunner
 import dev.minedmap.claudedroid.net.ActiveRun
 
 class Prefs(ctx: Context) {
-  private val sp = ctx.applicationContext.getSharedPreferences("claude_droid", Context.MODE_PRIVATE)
+  private val sp = ctx.applicationContext.getSharedPreferences(TermuxRunner.PREFS_FILE, Context.MODE_PRIVATE)
   var bridgeUrl: String
     get() = (sp.getString("bridgeUrl", "http://127.0.0.1:8765") ?: "http://127.0.0.1:8765").trimEnd('/')
     set(v) = sp.edit().putString("bridgeUrl", v.trimEnd('/')).apply()
@@ -16,9 +17,6 @@ class Prefs(ctx: Context) {
   var defaultCwd: String
     get() = sp.getString("defaultCwd", "/data/data/com.termux/files/home") ?: "/data/data/com.termux/files/home"
     set(v) = sp.edit().putString("defaultCwd", v).apply()
-  var lastConnectPort: Int
-    get() = sp.getInt("lastConnectPort", 0)
-    set(v) = sp.edit().putInt("lastConnectPort", v).apply()
   /** reqId + last SSE event id of a run in flight, so the app can reattach after process death. */
   fun activeRun(sid: Long): ActiveRun? = ActiveRun.decode(sp.getString("run_$sid", null))
   fun setActiveRun(sid: Long, r: ActiveRun?) {
@@ -26,7 +24,4 @@ class Prefs(ctx: Context) {
     if (r == null) e.remove("run_$sid") else e.putString("run_$sid", ActiveRun.encode(r))
     e.apply()
   }
-  var paired: Boolean
-    get() = sp.getBoolean("paired", false)
-    set(v) = sp.edit().putBoolean("paired", v).apply()
 }

@@ -1,5 +1,5 @@
 // Adapted from RikkaApps/Shizuku (Apache-2.0): manager/.../adb/AdbPairingService.kt
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.control
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager

@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="com.termux.permission.RUN_COMMAND"/>
+  <queries>
+    <package android:name="com.termux"/>
+  </queries>
+  <application>
+    <receiver android:name="dev.minedmap.claudedroid.core.termux.TermuxResultReceiver" android:exported="false"/>
+  </application>
+</manifest>

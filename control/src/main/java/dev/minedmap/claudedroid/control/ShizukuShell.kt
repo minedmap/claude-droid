@@ -1,10 +1,9 @@
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.control
 import android.content.ComponentName
 import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
-import dev.minedmap.claudedroid.IUserService
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import rikka.shizuku.Shizuku

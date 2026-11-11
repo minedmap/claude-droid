@@ -1,4 +1,4 @@
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.control
 import org.junit.Assert.*
 import org.junit.Test
 class DevSettingsIntentsTest {

@@ -1,4 +1,4 @@
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.control
 import android.content.Context
 
 interface PrivilegedShell {
@@ -11,7 +11,7 @@ interface PrivilegedShell {
 
 object Shells {
   suspend fun pick(ctx: Context): PrivilegedShell? =
-    listOf(ShizukuShell(ctx), TermuxShell(ctx)).firstOrNull {
+    listOf(ShizukuShell(ctx), TermuxAdbShell(ctx)).firstOrNull {
       try { it.available() } catch (_: Throwable) { false }
     }
 }

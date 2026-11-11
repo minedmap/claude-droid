@@ -1,5 +1,4 @@
-package dev.minedmap.claudedroid.adb
-import dev.minedmap.claudedroid.IUserService
+package dev.minedmap.claudedroid.control
 
 /** Runs inside the Shizuku user-service process (uid 2000 when Shizuku started via adb). */
 class UserService : IUserService.Stub() {

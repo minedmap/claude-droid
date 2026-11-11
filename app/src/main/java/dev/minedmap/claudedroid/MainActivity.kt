@@ -36,6 +36,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import dev.minedmap.claudedroid.control.ControlScreen
 import dev.minedmap.claudedroid.data.Prefs
 import dev.minedmap.claudedroid.ui.ChatScreen
 import dev.minedmap.claudedroid.ui.ConnectScreen
@@ -82,15 +83,18 @@ class MainActivity : ComponentActivity() {
             SessionListScreen(
               onOpen = { nav.navigate("chat/$it") },
               onSettings = { nav.navigate("settings") },
-              onConnect = { nav.navigate("connect") })
+              onConnect = { nav.navigate("connect") },
+              onControl = { nav.navigate("control") })
           }
           composable("chat/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) { e ->
             ChatScreen(e.arguments!!.getLong("id"), onBack = { nav.popBackStack() }, onConnect = { nav.navigate("connect") })
           }
-          composable("settings") { SettingsScreen(onBack = { nav.popBackStack() }, onConnect = { nav.navigate("connect") }) }
+          composable("settings") { SettingsScreen(onBack = { nav.popBackStack() }, onConnect = { nav.navigate("connect") }, onControl = { nav.navigate("control") }) }
           composable("connect") { ConnectScreen(onBack = {
             if (!nav.popBackStack()) nav.navigate("list") { popUpTo("connect") { inclusive = true } }
-          }) }
+          }, onControl = { nav.navigate("control") }) }
+          // Phone control is independent of the chat: reachable and usable with no bridge token.
+          composable("control") { ControlScreen(onBack = { nav.popBackStack() }) }
         }
       }
     }

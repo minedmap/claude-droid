@@ -1,5 +1,5 @@
 // Adapted from RikkaApps/Shizuku (Apache-2.0): manager/.../adb/AdbMdns.kt
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.control
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo

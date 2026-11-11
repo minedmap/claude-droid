@@ -1,40 +1,22 @@
-package dev.minedmap.claudedroid.adb
+package dev.minedmap.claudedroid.core.termux
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
-import dev.minedmap.claudedroid.data.Prefs
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
-class TermuxShell(private val ctx: Context) : PrivilegedShell {
-  override val name = "Termux"
-  private val prefs = Prefs(ctx)
-
-  override suspend fun available() = isInstalled(ctx) && hasPermission(ctx)
-
-  override suspend fun pair(port: Int, code: String) = run("$PREFIX/bin/adb", arrayOf("pair", "localhost:$port", code))
-
-  override suspend fun connect(port: Int): Result<String> {
-    prefs.lastConnectPort = port
-    return run("$PREFIX/bin/adb", arrayOf("connect", "localhost:$port"))
-  }
-
-  override suspend fun exec(cmd: String): Result<String> {
-    val port = prefs.lastConnectPort
-    val args = if (port > 0) arrayOf("-s", "localhost:$port", "shell", cmd) else arrayOf("shell", cmd)
-    return run("$PREFIX/bin/adb", args)
-  }
-
-  suspend fun startBridge() = run("$PREFIX/bin/sv", arrayOf("up", "$PREFIX/var/service/claude-droid"))
+/** Runs a Termux binary through RUN_COMMAND and waits for its result. Shared by chat (bridge start) and control (adb). */
+class TermuxRunner(ctx: Context) {
+  private val ctx = ctx.applicationContext
 
   suspend fun runScript(script: String): Result<String> = run("$PREFIX/bin/bash", arrayOf(script))
 
-  private suspend fun run(path: String, args: Array<String>): Result<String> {
+  suspend fun run(path: String, args: Array<String>): Result<String> {
     val id = counter.incrementAndGet()
     val d = CompletableDeferred<Bundle?>()
     pending[id] = d
@@ -66,7 +48,9 @@ class TermuxShell(private val ctx: Context) : PrivilegedShell {
   companion object {
     const val PREFIX = "/data/data/com.termux/files/usr"
     const val PERM = "com.termux.permission.RUN_COMMAND"
-    const val EXTRA_REQ = "reqId"
+    /** SharedPreferences file shared by every module, so module splits need no data migration. */
+    const val PREFS_FILE = "claude_droid"
+    internal const val EXTRA_REQ = "reqId"
     private val counter = AtomicInteger(1000)
     internal val pending = ConcurrentHashMap<Int, CompletableDeferred<Bundle?>>()
 
@@ -80,7 +64,7 @@ class TermuxShell(private val ctx: Context) : PrivilegedShell {
 
 class TermuxResultReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
-    val id = intent.getIntExtra(TermuxShell.EXTRA_REQ, -1)
-    TermuxShell.pending[id]?.complete(intent.getBundleExtra("result"))
+    val id = intent.getIntExtra(TermuxRunner.EXTRA_REQ, -1)
+    TermuxRunner.pending[id]?.complete(intent.getBundleExtra("result"))
   }
 }

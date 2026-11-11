@@ -45,7 +45,7 @@ import dev.minedmap.claudedroid.data.Prefs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onConnect: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onConnect: () -> Unit, onControl: () -> Unit) {
   val ctx = LocalContext.current
   val prefs = remember { Prefs(ctx) }
   var url by remember { mutableStateOf(prefs.bridgeUrl) }
@@ -100,6 +100,7 @@ fun SettingsScreen(onBack: () -> Unit, onConnect: () -> Unit) {
       }) { Text(if (testing) "확인 중…" else "연결 테스트") }
       testMsg?.let { Text(it, color = if (testOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
       Button(onClick = onConnect) { Text("연결 마법사") }
+      OutlinedButton(onClick = onControl) { Text("폰 제어 (adb)") }
       Text("USB 장치", style = MaterialTheme.typography.titleMedium)
       val u = usb
       Text(
