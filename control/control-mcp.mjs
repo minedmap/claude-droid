@@ -87,11 +87,14 @@ function defaultExec(bin, args, { timeout = 15000, input } = {}) {
   });
 }
 
-/** `adb devices` output -> [{serial, state}] */
+/** `adb devices [-l]` output -> [{serial, state, transport?}] */
 export function parseDevices(out) {
   return String(out).split('\n').map(l => l.trim())
     .filter(l => l && !l.startsWith('*') && !l.startsWith('List of devices'))
-    .map(l => l.split(/\s+/)).filter(p => p.length >= 2).map(([serial, state]) => ({ serial, state }));
+    .map(l => l.split(/\s+/)).filter(p => p.length >= 2).map(([serial, state, ...rest]) => {
+      const t = rest.map(x => /^transport_id:(\d+)$/.exec(x)).find(Boolean);
+      return t ? { serial, state, transport: t[1] } : { serial, state };
+    });
 }
 
 /** `adb mdns services` output -> ["host:port"] of wireless-debugging connect services */
@@ -167,8 +170,14 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   const autoWake = env.CONTROL_AUTO_WAKE !== '0';
   const autoConnectOn = env.CONTROL_AUTO_CONNECT !== '0';
   let resizer;                    // undefined = not probed, null = none, else binary name
-  const sizes = new Map();        // serial -> { width, height }
-  let awakeAt = -Infinity, connectAt = -Infinity, adbKeyboard;
+  // Per-device caches are keyed by serial + adb transport id: emulators reuse serials (emulator-5554),
+  // so a different AVD started behind the same serial must not inherit the old screen size.
+  const sizes = new Map();        // deviceKey -> { width, height }
+  let deviceKey = null, awakeAt = -Infinity, connectAt = -Infinity, adbKeyboard;
+  function useDevice(key) {
+    if (key === deviceKey) return;
+    deviceKey = key; awakeAt = -Infinity; adbKeyboard = undefined;
+  }
 
   async function run(bin, args, opts) {
     try { return await exec(bin, args, opts); } catch (e) {
@@ -190,14 +199,14 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     return true;
   }
 
-  async function listDevices() { return parseDevices((await run(adbBin, ['devices'], { timeout: 8000 })).stdout); }
+  async function listDevices() { return parseDevices((await run(adbBin, ['devices', '-l'], { timeout: 8000 })).stdout); }
 
   async function serial() {
-    if (env.ADB_SERIAL) return env.ADB_SERIAL;
+    if (env.ADB_SERIAL) { useDevice(env.ADB_SERIAL); return env.ADB_SERIAL; }
     let devs = await listDevices();
     let d = devs.find(x => x.state === 'device');
     if (!d && await autoConnect()) { devs = await listDevices(); d = devs.find(x => x.state === 'device'); }
-    if (d) return d.serial;
+    if (d) { useDevice(d.transport ? `${d.serial}#${d.transport}` : d.serial); return d.serial; }
     const seen = devs.length ? ` (seen: ${devs.map(x => `${x.serial} ${x.state}`).join(', ')})` : '';
     throw new Error('no adb device connected' + seen + ': open the Claude Droid app -> 폰 제어 (adb) and pair wireless debugging, or run `adb connect localhost:<port>`');
   }
@@ -237,7 +246,8 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   }
 
   async function deviceSize() {
-    const s = await serial();
+    await serial();
+    const s = deviceKey;
     if (!sizes.has(s)) {
       const out = await sh('wm size');
       const m = /Override size:\s*(\d+)x(\d+)/.exec(out) || /Physical size:\s*(\d+)x(\d+)/.exec(out);
@@ -310,6 +320,9 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
       const png = (await adb(['exec-out', 'screencap', '-p'], { timeout: 20000 })).stdout;
       const dev = pngSize(png);
       if (!dev) throw new Error('screencap returned no image (screen off or secure window?)');
+      // backstop when the transport id is unknown (ADB_SERIAL): a screenshot that fits neither orientation means another device
+      const known = sizes.get(deviceKey);
+      if (known && !((known.width === dev.width && known.height === dev.height) || (known.width === dev.height && known.height === dev.width))) sizes.delete(deviceKey);
       let data = png, mimeType = 'image/png', s = await scale();
       if (s > 1) {
         try {

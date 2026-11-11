@@ -347,3 +347,24 @@ test('ui dumps: uiautomator errors are reported, retried once, and wait_for keep
   const never = fake({ over: { uiautomator: idle, shell: { 'uiautomator dump': idle } } });
   await assert.rejects(mk(never, {}, { t: 0 }).call('wait_for', { text: 'x', gone: true, timeoutMs: 1000 }), /timeout after 1000ms .*last uiautomator dump failed: ERROR: could not get idle state/);
 });
+
+test('a different emulator behind the same serial gets a fresh screen size (transport id, screenshot backstop)', async () => {
+  let transport = 1, size = '1280x2856';
+  const f = fake({ magick: true,
+    devices: () => `List of devices attached\nemulator-5554          device product:x model:y transport_id:${transport}\n`,
+    over: { adb: a => a[2] === 'shell' && a[3] === 'wm size' ? `Physical size: ${size}\n` : undefined } });
+  const m = mk(f);
+  assert.equal((await m.call('device_info', {})).scale, 2.2313);
+  transport = 2; size = '720x1280';
+  assert.equal((await m.call('device_info', {})).scale, 1);
+  assert.equal((await m.call('ui_tree', {})).scale, 1);
+  assert.deepEqual(parseDevices('emulator-5554 device product:a transport_id:7\n'), [{ serial: 'emulator-5554', state: 'device', transport: '7' }]);
+  // ADB_SERIAL: no transport id; the screenshot size exposes the stale cache
+  let wm = '1280x2856';
+  const g = fake({ over: { adb: a => a[2] === 'shell' && a[3] === 'wm size' ? `Physical size: ${wm}\n` : undefined } });
+  const n = mk(g, { ADB_SERIAL: 'emulator-5554', CONTROL_MAX_SIDE: '0' });
+  await n.call('device_info', {});
+  wm = '1080x2400';   // fake screencap is 1080x2400
+  await n.call('screenshot', {});
+  assert.deepEqual((await n.call('device_info', {})).screen, { width: 1080, height: 2400 });
+});
