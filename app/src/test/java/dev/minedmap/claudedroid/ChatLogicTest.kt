@@ -34,6 +34,13 @@ class ChatLogicTest {
     assertEquals("2h 17m", ChatLogic.resetIn(137 * 60_000L, 0))
     assertEquals("3d 4h", ChatLogic.resetIn((3 * 1440 + 4 * 60) * 60_000L, 0))
   }
+  @Test fun usageParseOffsetTimestamps() {
+    val u = UsageInfo.parse("""{"session":{"pct":14,"resetsAt":"2026-11-12T13:00:00.394657+00:00"},"weekly":{"pct":2,"resetsAt":"2026-11-18T15:00:00Z"}}""")!!
+    assertEquals(14.0, u.sessionPct!!, 0.0)
+    assertEquals(1794488400394L, u.sessionResetMs)
+    assertEquals(1795014000000L, u.weeklyResetMs)
+    assertNull(UsageInfo.parse("""{"error":"x"}"""))
+  }
   @Test fun usageLabel() {
     assertNull(ChatLogic.usageLabel(null, 0))
     assertEquals("세션 13% (2h 17m) · 주간 2%", ChatLogic.usageLabel(UsageInfo(13.0, 137 * 60_000L, 2.0, null), 0))
