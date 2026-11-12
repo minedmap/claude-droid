@@ -48,6 +48,7 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
     .stateIn(viewModelScope, SharingStarted.Eagerly, null)
   val bridgeUp = MutableStateFlow<Boolean?>(null)
   val adbUp = MutableStateFlow<Boolean?>(null)
+  val usage = MutableStateFlow<dev.minedmap.claudedroid.net.UsageInfo?>(null)
   val pending = MutableStateFlow<List<Attachment>>(emptyList())
   val uploading = MutableStateFlow(0)
   private val _toast = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -100,12 +101,19 @@ class ChatViewModel(app: Application, private val sid: Long) : AndroidViewModel(
   init {
     viewModelScope.launch {
       polling.collectLatest { on ->
+        var tick = 0
+        var wasRunning = false
         while (on) {
-          if (!isRunning.value) {
+          val running = isRunning.value
+          if (!running) {
             val a = client.adbConnected()
             bridgeUp.value = a != null
             adbUp.value = a
+            // usage: on start, every ~60s, and right after a run finishes
+            if (a != null && (tick % 12 == 0 || wasRunning)) usage.value = client.usage() ?: usage.value
           }
+          wasRunning = running
+          tick++
           kotlinx.coroutines.delay(5000)
         }
       }

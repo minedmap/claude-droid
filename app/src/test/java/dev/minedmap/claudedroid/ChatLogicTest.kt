@@ -1,6 +1,8 @@
 package dev.minedmap.claudedroid
 import dev.minedmap.claudedroid.net.ActiveRun
 import dev.minedmap.claudedroid.net.ChatLogic
+import dev.minedmap.claudedroid.net.UiEvent
+import dev.minedmap.claudedroid.net.UsageInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -20,11 +22,21 @@ class ChatLogicTest {
     assertTrue(ChatLogic.isNoConversation(null, "no conversation found"))
     assertFalse(ChatLogic.isNoConversation("fine", null))
   }
-  @Test fun costLabel() {
-    assertNull(ChatLogic.costLabel(null))
-    assertNull(ChatLogic.costLabel(0.0))
-    assertNull(ChatLogic.costLabel(Double.NaN))
-    assertEquals("💰 $0.0123", ChatLogic.costLabel(0.0123))
+  @Test fun tokenLabel() {
+    assertNull(ChatLogic.tokenLabel(null))
+    assertNull(ChatLogic.tokenLabel(UiEvent.TokenUsage(0, 0, 0, 0)))
+    assertEquals("🔢 입력 1.2k · 출력 45 · 캐시 8.4k", ChatLogic.tokenLabel(UiEvent.TokenUsage(1200, 45, 8000, 400)))
+  }
+  @Test fun resetIn() {
+    assertNull(ChatLogic.resetIn(null, 0))
+    assertNull(ChatLogic.resetIn(1000, 2000))
+    assertEquals("45m", ChatLogic.resetIn(45 * 60_000L, 0))
+    assertEquals("2h 17m", ChatLogic.resetIn(137 * 60_000L, 0))
+    assertEquals("3d 4h", ChatLogic.resetIn((3 * 1440 + 4 * 60) * 60_000L, 0))
+  }
+  @Test fun usageLabel() {
+    assertNull(ChatLogic.usageLabel(null, 0))
+    assertEquals("세션 13% (2h 17m) · 주간 2%", ChatLogic.usageLabel(UsageInfo(13.0, 137 * 60_000L, 2.0, null), 0))
   }
   @Test fun doneError() {
     assertNull(ChatLogic.doneError(0, "x", false, false))

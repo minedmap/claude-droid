@@ -9,7 +9,8 @@ sealed interface UiEvent {
   data class ToolResult(val text: String, val isError: Boolean = false) : UiEvent
   /** image block inside a tool_result (Read of a png, screenshot MCP, ...) */
   data class ToolImage(val mediaType: String, val base64: String) : UiEvent
-  data class Result(val text: String, val costUsd: Double?, val isError: Boolean = false) : UiEvent
+  data class TokenUsage(val input: Long, val output: Long, val cacheRead: Long, val cacheWrite: Long)
+  data class Result(val text: String, val costUsd: Double?, val isError: Boolean = false, val usage: TokenUsage? = null) : UiEvent
   data class Done(val code: Int, val stderr: String) : UiEvent
   data class Raw(val text: String) : UiEvent
   data class Delta(val text: String) : UiEvent
@@ -38,7 +39,11 @@ object StreamParser {
         val err = o.optBoolean("is_error", false) || o.optString("subtype").startsWith("error")
         val text = o.optString("result").ifBlank { if (err) o.optString("subtype") else "" }
         val cost = if (o.has("total_cost_usd")) o.optDouble("total_cost_usd").takeIf { !it.isNaN() } else null
-        listOf(UiEvent.Result(text, cost, err))
+        val u = o.optJSONObject("usage")?.let {
+          UiEvent.TokenUsage(it.optLong("input_tokens"), it.optLong("output_tokens"),
+            it.optLong("cache_read_input_tokens"), it.optLong("cache_creation_input_tokens"))
+        }
+        listOf(UiEvent.Result(text, cost, err, u))
       }
       "stream_event" -> {
         val e = o.optJSONObject("event")

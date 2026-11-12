@@ -20,6 +20,8 @@ class StreamParserTest {
     StreamParser.parse("""{"type":"stream_event","event":{"type":"message_start"}}"""))
   @Test fun cost() = assertEquals(listOf(UiEvent.Result("ok", 0.0123)),
     StreamParser.parse("""{"type":"result","result":"ok","total_cost_usd":0.0123}"""))
+  @Test fun resultUsage() = assertEquals(listOf(UiEvent.Result("ok", 0.01, false, UiEvent.TokenUsage(10, 5, 100, 20))),
+    StreamParser.parse("""{"type":"result","result":"ok","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}"""))
   @Test fun resultIsError() = assertEquals(listOf(UiEvent.Result("boom", 0.0, true)),
     StreamParser.parse("""{"type":"result","is_error":true,"result":"boom","total_cost_usd":0}"""))
   @Test fun resultErrorSubtypeWithoutText() = assertEquals(listOf(UiEvent.Result("error_max_turns", null, true)),
