@@ -54,7 +54,7 @@ test('/usage: 401 without token, never leaks token, soft-fails without login', a
 });
 test('health ok', async () => {
   const r = await fetch(base + '/health', { headers: H });
-  assert.deepEqual(await r.json(), { ok: true });
+  assert.deepEqual(await r.json(), { ok: true, home: os.homedir() });
 });
 test('chat streams SSE, passes --resume, ends with done', async () => {
   const { r, events } = await chat({ prompt: 'yo', sessionId: 'abc', cwd: process.cwd() });

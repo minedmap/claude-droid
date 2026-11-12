@@ -51,7 +51,7 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
       return;
     }
     if (req.method === 'GET' && url.pathname === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}'); return;
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, home: os.homedir() })); return;
     }
     if (req.method === 'GET' && url.pathname === '/usage') {
       const r = await getUsage();

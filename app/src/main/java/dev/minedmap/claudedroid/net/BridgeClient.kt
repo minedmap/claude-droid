@@ -66,6 +66,15 @@ class BridgeClient(private val base: String, private val token: String) {
     }.getOrNull()
   }
 
+  /** bridge's home dir from /health (older bridges: null) */
+  suspend fun home(): String? = withContext(Dispatchers.IO) {
+    runCatching {
+      SHORT.newCall(Request.Builder().url("$base/health").header("X-Token", token).build()).execute().use {
+        if (!it.isSuccessful) null else JSONObject(it.body!!.string()).optString("home", "").takeIf { h -> h.startsWith("/") }
+      }
+    }.getOrNull()
+  }
+
   /** null = 브리지 응답 없음 또는 사용량 조회 불가 (구독 로그인 아님 등) */
   suspend fun usage(): UsageInfo? = withContext(Dispatchers.IO) {
     runCatching {
