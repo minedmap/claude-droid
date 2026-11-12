@@ -140,7 +140,7 @@ test('open_app / list_apps / device_info', async () => {
   const f = fake(); const m = mk(f);
   await m.call('open_app', { package: 'com.a' });
   await m.call('open_app', { package: 'com.a', activity: '.Main' });
-  assert.deepEqual(f.shells(), ['monkey -p com.a -c android.intent.category.LAUNCHER 1', 'am start -n com.a/.Main']);
+  assert.deepEqual(f.shells(), ['cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.a 2>/dev/null', 'monkey -p com.a -c android.intent.category.LAUNCHER 1', 'am start -n com.a/.Main']);
   await assert.rejects(m.call('open_app', { package: 'com.a; reboot' }), /invalid package/);
   assert.deepEqual(await m.call('list_apps', {}), { count: 2, packages: ['com.a', 'org.b'] });
   assert.deepEqual((await m.call('list_apps', { filter: 'ORG' })).packages, ['org.b']);
