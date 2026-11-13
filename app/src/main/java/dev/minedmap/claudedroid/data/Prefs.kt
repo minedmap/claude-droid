@@ -17,6 +17,8 @@ class Prefs(ctx: Context) {
   var defaultCwd: String
     get() = sp.getString("defaultCwd", "/data/data/com.termux/files/home") ?: "/data/data/com.termux/files/home"
     set(v) = sp.edit().putString("defaultCwd", v).apply()
+  /** true once the user (or a bridge-reported default) has stored a cwd */
+  fun hasCwd(): Boolean = sp.contains("defaultCwd")
   /** reqId + last SSE event id of a run in flight, so the app can reattach after process death. */
   fun activeRun(sid: Long): ActiveRun? = ActiveRun.decode(sp.getString("run_$sid", null))
   fun setActiveRun(sid: Long, r: ActiveRun?) {

@@ -75,7 +75,11 @@ fun SessionListScreen(onOpen: (Long) -> Unit, onSettings: () -> Unit, onConnect:
       })
     },
     floatingActionButton = {
-      FloatingActionButton(onClick = { newCwd = prefs.defaultCwd; showNew = true }) { Icon(Icons.Filled.Add, "새 세션") }
+      FloatingActionButton(onClick = {
+        newCwd = prefs.defaultCwd; showNew = true
+        // no cwd chosen yet: default to the bridge's own home instead of the Termux path
+        if (!prefs.hasCwd()) scope.launch { dev.minedmap.claudedroid.net.BridgeClient.of(prefs).home()?.let { newCwd = it } }
+      }) { Icon(Icons.Filled.Add, "새 세션") }
     }
   ) { pad ->
     LazyColumn(contentPadding = pad) {

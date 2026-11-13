@@ -13,9 +13,10 @@ jobs:
       - run: cd control && chmod +x test/fake-adb.sh && node --test
       - run: chmod +x gradlew && ./gradlew --no-daemon testDebugUnitTest assembleDebug
         env: { ANDROID_HOME: /usr/local/lib/android/sdk }
+      - run: mkdir -p out && cp app/build/outputs/apk/debug/app-debug.apk out/claude-droid.apk
       - uses: actions/upload-artifact@v4
-        with: { name: apk, path: app/build/outputs/apk/debug/*.apk }
-      - run: mkdir -p out && zip -r out/bridge.zip bridge control/control-mcp.mjs control/setup.sh -x 'bridge/test/*' && zip out/control.zip control/control-mcp.mjs control/setup.sh
+        with: { name: apk, path: out/claude-droid.apk }
+      - run: zip -r out/bridge.zip bridge control/control-mcp.mjs control/setup.sh -x 'bridge/test/*' && zip out/control.zip control/control-mcp.mjs control/setup.sh
       - uses: actions/upload-artifact@v4
         with: { name: bridge, path: out/bridge.zip }
       - uses: actions/upload-artifact@v4

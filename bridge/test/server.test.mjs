@@ -36,9 +36,25 @@ async function chat(body) {
 test('401 without token', async () => {
   assert.equal((await fetch(base + '/health')).status, 401);
 });
+test('parseUsage maps five_hour/seven_day, errors on empty', async () => {
+  const { parseUsage } = await import('../server.mjs');
+  assert.deepEqual(parseUsage({ five_hour: { utilization: 13, resets_at: 'x' }, seven_day: { utilization: 2, resets_at: 'y' } }),
+    { session: { pct: 13, resetsAt: 'x' }, weekly: { pct: 2, resetsAt: 'y' } });
+  assert.deepEqual(parseUsage({ five_hour: null, seven_day: { utilization: 2 } }).session, null);
+  assert.ok(parseUsage({}).error);
+});
+test('/usage: 401 without token, never leaks token, soft-fails without login', async () => {
+  assert.equal((await fetch(base + '/usage')).status, 401);
+  const old = { h: process.env.HOME, o: process.env.CLAUDE_OAUTH_TOKEN, u: process.env.CLAUDE_USAGE_URL, r: process.env.UBUNTU_ROOTFS };
+  process.env.HOME = '/nonexistent-home'; process.env.UBUNTU_ROOTFS = '/nonexistent-rootfs'; delete process.env.CLAUDE_OAUTH_TOKEN;
+  const r = await fetch(base + '/usage', { headers: { 'x-token': 't0k' } });
+  assert.equal(r.status, 503);
+  assert.match((await r.json()).error, /no subscription login/);
+  Object.assign(process.env, { HOME: old.h }); if (old.r === undefined) delete process.env.UBUNTU_ROOTFS; else process.env.UBUNTU_ROOTFS = old.r;
+});
 test('health ok', async () => {
   const r = await fetch(base + '/health', { headers: H });
-  assert.deepEqual(await r.json(), { ok: true });
+  assert.deepEqual(await r.json(), { ok: true, home: os.homedir() });
 });
 test('chat streams SSE, passes --resume, ends with done', async () => {
   const { r, events } = await chat({ prompt: 'yo', sessionId: 'abc', cwd: process.cwd() });

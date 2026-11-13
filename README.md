@@ -48,7 +48,7 @@ The full order for a fresh device. Run the commands from the Installation sectio
 5. **Fully exit and reopen Termux** (required): Termux notification → **Exit**, then open Termux again. On a first `termux-services` install the bridge service only starts after this. Check with `bash ~/claude-droid/start.sh`.
 6. **Enable developer options**: Settings → About phone → Software information → tap **Build number** 7 times (location varies by vendor).
 7. **Enable wireless debugging**: Settings → Developer options → **Wireless debugging** ON (needs Wi-Fi, Android 11+). The app's wizard handles pairing.
-8. **Install the app** (`app-debug.apk` from [Releases](https://github.com/minedmap/claude-droid/releases/latest)).
+8. **Install the app** (`claude-droid.apk` from [Releases](https://github.com/minedmap/claude-droid/releases/latest)).
    - Allow **notifications** on first launch (needed for background runs and pairing-code entry).
    - Settings → Apps → Claude Droid and Termux → Battery → **Unrestricted / don't optimize**, so long runs are not killed.
 9. **Paste the token in the app → connection wizard**: allow RUN_COMMAND. Wireless debugging is paired on the separate **폰 제어 (adb)** screen (optional).

@@ -389,7 +389,7 @@ class ChatService : Service() {
             if (retryable && ChatLogic.isNoConversation(ev.text)) noConv = true
             else { addMsg(sid, "error", ev.text.ifBlank { "오류" }); errorShown = true }
           }
-          ChatLogic.costLabel(ev.costUsd)?.let { addMsg(sid, "tool_result", it) }
+          ChatLogic.tokenLabel(ev.usage)?.let { addMsg(sid, "tool_result", it) }
         }
         is UiEvent.Done -> {
           done = true

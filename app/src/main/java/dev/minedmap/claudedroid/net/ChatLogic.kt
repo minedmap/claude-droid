@@ -27,9 +27,41 @@ object ChatLogic {
   fun isNoConversation(vararg texts: String?): Boolean =
     texts.any { it?.contains(NO_CONVERSATION, ignoreCase = true) == true }
 
-  /** null when cost is missing / zero / not a number. */
-  fun costLabel(c: Double?): String? =
-    if (c == null || c.isNaN() || c <= 0.0) null else "💰 $" + String.format(Locale.US, "%.4f", c)
+  fun fmtTokens(n: Long): String = when {
+    n >= 1_000_000 -> String.format(Locale.US, "%.1fM", n / 1_000_000.0)
+    n >= 1_000 -> String.format(Locale.US, "%.1fk", n / 1_000.0)
+    else -> n.toString()
+  }
+
+  /** null when usage is missing or all zero. Cache = read + write. */
+  fun tokenLabel(u: UiEvent.TokenUsage?): String? {
+    if (u == null || (u.input + u.output + u.cacheRead + u.cacheWrite) <= 0L) return null
+    return "🔢 입력 ${fmtTokens(u.input)} · 출력 ${fmtTokens(u.output)} · 캐시 ${fmtTokens(u.cacheRead + u.cacheWrite)}"
+  }
+
+  /** "2h 17m" / "45m" / "3d 4h"; null when past or unparsable. */
+  fun resetIn(resetsAtMs: Long?, nowMs: Long): String? {
+    if (resetsAtMs == null) return null
+    val m = (resetsAtMs - nowMs) / 60_000
+    if (m <= 0) return null
+    return when {
+      m >= 1440 -> "${m / 1440}d ${(m % 1440) / 60}h"
+      m >= 60 -> "${m / 60}h ${m % 60}m"
+      else -> "${m}m"
+    }
+  }
+
+  fun usageLabel(u: UsageInfo?, nowMs: Long): String? {
+    if (u == null) return null
+    val parts = mutableListOf<String>()
+    u.sessionPct?.let { p ->
+      parts += "세션 ${Math.round(p)}%" + (resetIn(u.sessionResetMs, nowMs)?.let { " ($it)" } ?: "")
+    }
+    u.weeklyPct?.let { p ->
+      parts += "주간 ${Math.round(p)}%" + (resetIn(u.weeklyResetMs, nowMs)?.let { " ($it)" } ?: "")
+    }
+    return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+  }
 
   /** Text for the extra error bubble on a done event, or null when none should be shown. */
   fun doneError(code: Int, stderr: String, errorShown: Boolean, userStopped: Boolean): String? =

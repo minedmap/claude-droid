@@ -9,6 +9,12 @@ android {
     applicationId = "dev.minedmap.claudedroid"
     minSdk = 26; targetSdk = 34; versionCode = 11; versionName = "0.7.0"
   }
+  // Fixed debug key so every CI build can update the previous one (no INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+  signingConfigs {
+    getByName("debug") {
+      storeFile = file("debug.keystore"); storePassword = "android"; keyAlias = "androiddebugkey"; keyPassword = "android"
+    }
+  }
   buildFeatures { compose = true }
   compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
   kotlinOptions { jvmTarget = "17" }

@@ -29,7 +29,7 @@ Android에서 **Claude Code**를 채팅 GUI로 쓰는 앱. 세션 분리/재개,
 5. **Termux 완전 종료 후 재실행**(필수): 알림창의 Termux 알림 → **Exit** → Termux를 다시 엽니다. `termux-services`를 처음 설치하면 이걸 해야 브리지 서비스가 자동 실행됩니다. 이후 `bash ~/claude-droid/start.sh`로 확인합니다.
 6. **개발자 옵션 켜기**: 설정 → 휴대전화 정보 → 소프트웨어 정보 → **빌드번호** 7번 탭(제조사마다 위치가 조금 다름).
 7. **무선 디버깅 켜기**: 설정 → 개발자 옵션 → **무선 디버깅** ON(Wi-Fi 연결 필요, Android 11+). 페어링은 앱의 연결 마법사가 안내합니다.
-8. **앱 APK 설치**: [Releases](https://github.com/minedmap/claude-droid/releases/latest)의 `app-debug.apk`.
+8. **앱 APK 설치**: [Releases](https://github.com/minedmap/claude-droid/releases/latest)의 `claude-droid.apk`.
    - 첫 실행 시 **알림 권한 허용**(백그라운드 실행, 페어링 코드 입력에 필요).
    - 설정 → 앱 → Claude Droid, Termux → 배터리 → **제한 없음/최적화 안 함**(긴 작업 중 종료 방지).
 9. **앱에서 토큰 붙여넣기 → 연결 마법사**: RUN_COMMAND 권한 허용. 무선 디버깅 페어링은 **폰 제어 (adb)** 화면에서 합니다(선택).

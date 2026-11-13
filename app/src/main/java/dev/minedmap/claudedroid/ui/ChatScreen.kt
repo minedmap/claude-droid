@@ -93,6 +93,7 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
   val running by vm.isRunning.collectAsState()
   val up by vm.bridgeUp.collectAsState()
   val adb by vm.adbUp.collectAsState()
+  val usage by vm.usage.collectAsState()
   val session by vm.session.collectAsState()
   val partial by vm.partial.collectAsState()
   val status by vm.status.collectAsState()
@@ -141,6 +142,9 @@ fun ChatScreen(sessionId: Long, onBack: () -> Unit, onConnect: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
               StatusDot("브리지", up)
               StatusDot("adb", if (up == false) null else adb)
+            }
+            dev.minedmap.claudedroid.net.ChatLogic.usageLabel(usage, System.currentTimeMillis())?.let {
+              Text(it, style = MaterialTheme.typography.labelSmall, maxLines = 1)
             }
           }
         },

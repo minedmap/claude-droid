@@ -51,7 +51,11 @@ export function createBridge({ token, claudeBin = 'claude', adbBin = process.env
       return;
     }
     if (req.method === 'GET' && url.pathname === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}'); return;
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, home: os.homedir() })); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/usage') {
+      const r = await getUsage();
+      return json(res, r.error ? 503 : 200, r);
     }
     if (req.method === 'GET' && url.pathname === '/runs') {
       const runs = [...runsById.values()].map(r => ({ reqId: r.reqId, startedAt: r.startedAt, done: r.done, code: r.code, events: r.next }));
@@ -202,6 +206,35 @@ async function upload(req, res, url) {
   }
   if (over) { fs.rmSync(target, { force: true }); return json(res, 413, { error: 'too large' }); }
   json(res, 200, cwd && !found ? { path: toGuest(target), warning: 'cwd not found, saved to home' } : { path: toGuest(target) });
+}
+
+// --- subscription usage (session 5h / weekly) via Claude OAuth usage endpoint (undocumented; fails soft) ---
+export function parseUsage(j) {
+  const f = x => (x && typeof x.utilization === 'number') ? { pct: x.utilization, resetsAt: x.resets_at || null } : null;
+  const session = f(j && j.five_hour), weekly = f(j && j.seven_day);
+  return session || weekly ? { session, weekly } : { error: 'no usage data' };
+}
+function credentialFiles() {
+  const rootfs = ubuntuRootfs();
+  return [path.join(os.homedir(), '.claude', '.credentials.json'), path.join(rootfs, 'root/.claude/.credentials.json'),
+    ...(() => { try { return fs.readdirSync(path.join(rootfs, 'home')).map(u => path.join(rootfs, 'home', u, '.claude/.credentials.json')); } catch { return []; } })()];
+}
+let usageCache = { at: 0, val: null };
+async function getUsage() {
+  if (usageCache.val && Date.now() - usageCache.at < 60_000) return usageCache.val;
+  let tok = process.env.CLAUDE_OAUTH_TOKEN || '';
+  if (!tok) for (const f of credentialFiles()) {
+    try { tok = JSON.parse(fs.readFileSync(f, 'utf8')).claudeAiOauth.accessToken; if (tok) break; } catch {}
+  }
+  if (!tok) return { error: 'no subscription login' };
+  try {
+    const r = await fetch(process.env.CLAUDE_USAGE_URL || 'https://api.anthropic.com/api/oauth/usage', {
+      headers: { Authorization: `Bearer ${tok}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return { error: `usage http ${r.status}` };
+    const val = parseUsage(await r.json());
+    if (!val.error) usageCache = { at: Date.now(), val };
+    return val;
+  } catch (e) { return { error: 'usage fetch failed' }; }
 }
 
 const PREFIX = () => process.env.PREFIX || '/data/data/com.termux/files/usr';

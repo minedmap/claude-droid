@@ -413,7 +413,13 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
       const p = String(a.package);
       if (!/^[A-Za-z0-9_.]+$/.test(p)) throw new Error(`invalid package: ${p}`);
       if (a.activity !== undefined && !/^[A-Za-z0-9_.$]+$/.test(String(a.activity))) throw new Error(`invalid activity: ${a.activity}`);
-      const out = await sh(a.activity ? `am start -n ${p}/${a.activity}` : `monkey -p ${p} -c android.intent.category.LAUNCHER 1`, { timeout: 20000 });
+      let cmd = a.activity ? `am start -n ${p}/${a.activity}` : null;
+      if (!cmd) {
+        // monkey silently does nothing on some images (e.g. Redroid): resolve the launcher activity and start it directly
+        const r = (await sh(`cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${p} 2>/dev/null`, { timeout: 20000 })).trim().split('\n').pop().trim();
+        cmd = /^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(r) ? `am start -n ${r}` : `monkey -p ${p} -c android.intent.category.LAUNCHER 1`;
+      }
+      const out = await sh(cmd, { timeout: 20000 });
       if (/No activities found|Error:|does not exist/.test(out)) throw new Error(out.trim());
       return { ok: true };
     },
