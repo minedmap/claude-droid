@@ -3,12 +3,19 @@
 // "Computer use" for an Android device over adb. Works with any MCP client; needs no Claude Droid bridge or token.
 //   ADB_BIN              adb binary (default: adb)
 //   ADB_SERIAL           device serial (default: first device in `adb devices`)
-//   CONTROL_MAX_SIDE     longest screenshot side in px when ImageMagick is available (default 1280, 0 = never resize)
+//   CONTROL_MAX_SIDE     longest screenshot side in px when ImageMagick is available (default 960, 0 = never resize)
+//   CONTROL_JPEG_QUALITY JPEG quality of resized screenshots (default 60)
 //   CONTROL_OBSERVE      default `observe` for action tools: none | ui | screenshot | auto (default auto: ui list, plus a screenshot when the tree is near-empty)
-//   CONTROL_SETTLE_MS    wait before observing after an action (default 700)
+//   CONTROL_SETTLE_MS    MAX wait before observing after an action (default 700); the wait ends early as soon as the screen stops changing
+//   CONTROL_SETTLE_ADAPTIVE 0 = always wait the full settleMs (default: adaptive)
+//   CONTROL_TIMING       1 = log a per-call millisecond breakdown (adb spawns, uiautomator dump, screencap, resize, parse, settle, cdp) to stderr
 //   CONTROL_AUTO_WAKE    0 = do not wake the screen before acting (default on)
 //   CONTROL_AUTO_CONNECT 0 = do not re-discover/reconnect wireless debugging when the device is gone (default on)
 import { execFile } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import crypto from 'node:crypto';
+import http from 'node:http';
+import net from 'node:net';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 
@@ -26,7 +33,17 @@ export const MAX_LIST = 60;
 /** extra arguments every action tool accepts */
 const ACT = {
   observe: { type: 'string', enum: OBSERVE, description: 'after acting, wait settleMs and return the new screen: "auto" (default: element list with @refs; a screenshot is added automatically when the UI tree is near-empty, e.g. games/canvas/Flutter/WebView), "ui" (list only), "screenshot" (image only) or "none".' },
-  settleMs: num('wait before observing, default 700'),
+  settleMs: num('max wait before observing, default 700; ends early once the screen stops changing'),
+};
+/** which devtools socket / page the web_* tools talk to */
+const WEB_TARGET = {
+  package: str('app whose WebView to use (default: the app in the foreground, else Chrome)'),
+  socket: str('exact devtools socket name from the error list, e.g. "webview_devtools_remote_1234" or "chrome_devtools_remote"'),
+  target: str('page index (0-based) or a substring of its url/title when the app has several pages/tabs (default: the first page)'),
+};
+const WEB_OBS = {
+  observe: { type: 'string', enum: ['web', 'none'], description: '"web" (default): return a fresh web_snapshot after acting; "none": only the result' },
+  settleMs: num('wait before the follow-up snapshot, default 300'),
 };
 const act = (properties, required) => obj({ ...properties, ...ACT }, required);
 const QUERY = {
@@ -43,7 +60,8 @@ export const KEYS = {
 const POWER_KEYS = new Set([26, 223, 224, 'KEYCODE_POWER', 'KEYCODE_SLEEP', 'KEYCODE_WAKEUP', 'KEYCODE_SOFT_SLEEP']);
 
 export const INSTRUCTIONS = `This server drives a real Android phone over adb. You may operate it directly and autonomously: open apps, navigate, scroll, read and type without asking the user to do it for you, and keep going until the task is done.
-Loop: observe -> act -> verify. Every action already returns the new screen (observe "auto"): a compact list of actionable elements with refs like @e3, plus a screenshot automatically when the UI tree is near-empty (games, canvases, Flutter, WebView, secure windows). Tap with tap_element ref:"@e3" (refs come from the LAST ui_tree/observe; after the screen changes take a new snapshot, a stale ref errors). Otherwise tap_element by text/desc/id, or raw x,y from a screenshot. Use screenshot for images and layout. Pass observe:"none" to skip, "ui" for the list only, or "screenshot", use wait_for after slow transitions, and chain predictable steps with batch.
+Loop: observe -> act -> verify. Every action already returns the new screen (observe "auto"): a compact list of actionable elements with refs like @e3, plus a screenshot automatically when the UI tree is near-empty (games, canvases, Flutter, WebView, secure windows). Tap with tap_element ref:"@e3" (refs come from the LAST ui_tree/observe; after the screen changes take a new snapshot, a stale ref errors). Otherwise tap_element by text/desc/id, or raw x,y from a screenshot. Use screenshot for images and layout. Pass observe:"none" to skip, "ui" for the list only, or "screenshot", use wait_for after slow transitions, and chain predictable steps with batch (steps may include wait_for; its own observe runs once at the end).
+Hybrid apps / WebViews / Chrome pages: use web_snapshot, web_click ref:"@w2", web_type and web_eval (Chrome DevTools Protocol) instead of ui_tree: they see the DOM, are far faster than a uiautomator dump, and need no screenshot. Note: each ui_tree/observe costs a uiautomator dump (about 1-2 s on a phone), so prefer batch and observe:"none" for predictable steps.
 If something is not where you expected, look again (scroll, back, ui_tree all:true) before giving up. shell runs as the adb shell user, so am, pm, cmd, settings, dumpsys, content and input are available for anything the tools do not cover (intents, settings toggles, reading notifications with dumpsys notification).
 The server wakes the screen and reconnects wireless debugging by itself. Stop and ask the user only for a secure lock screen, a login/password, or an irreversible or outward action they did not ask for (payments, purchases, deleting data, sending messages or posts to someone new).`;
 
@@ -72,8 +90,16 @@ export const TOOLS = {
     schema: act({ url: { type: 'string' }, package: str('app to handle it, e.g. com.android.chrome') }, ['url']) },
   wait_for: { wake: true, description: 'Wait until an element matching text/desc and/or id appears (or disappears with gone:true). Use after actions that load or animate.',
     schema: obj({ ...QUERY, gone: bool('wait for it to disappear instead'), timeoutMs: num('default 10000, max 120000') }) },
-  batch: { action: true, description: 'Run several tool calls in order in one round trip, e.g. [{"tool":"open_app","args":{"package":"com.android.settings"}},{"tool":"wait_for","args":{"text":"Wi-Fi"}},{"tool":"tap_element","args":{"text":"Wi-Fi"}}]. A {"tool":"sleep","args":{"ms":500}} step pauses. Stops at the first failing step unless continueOnError. Steps do not observe unless they say so; batch\'s own observe runs once at the end.',
+  batch: { action: true, description: 'Run several tool calls in order in one round trip, e.g. [{"tool":"open_app","args":{"package":"com.android.settings"}},{"tool":"wait_for","args":{"text":"Wi-Fi"}},{"tool":"tap_element","args":{"text":"Wi-Fi"}}] (steps can be any tool incl. wait_for and web_*; a {"tool":"sleep","args":{"ms":500}} step pauses). Each step runs with observe:"none" (no per-step screen dump), and the batch\'s own `observe` (default auto) runs ONCE at the end after settling, so a whole flow costs one final observation instead of one per step. Use wait_for steps for slow transitions instead of fixed sleeps. Stops at the first failing step unless continueOnError (a failed batch returns without the final observation).',
     schema: act({ steps: { type: 'array', items: obj({ tool: { type: 'string' }, args: { type: 'object' } }, ['tool']) }, continueOnError: bool('run the remaining steps after a failure') }, ['steps']) },
+  web_snapshot: { description: 'WebView / Chrome page via Chrome DevTools Protocol (adb forward to the app\'s devtools socket; no npm deps): list the interactive DOM elements of the page that is on screen as `@w1 link "Sign in" [x,y]` (x,y = CSS px in the page viewport, NOT screen pixels; do not pass them to `tap`), plus visible texts. Much more reliable than ui_tree for hybrid apps/WebViews/Chrome pages, which have no useful accessibility tree. The app must have WebView debugging enabled (Chrome always; WebView apps need setWebContentsDebuggingEnabled(true), debuggable builds have it on). Fails with the list of devtools sockets it found if there is none. Refs are valid until the next web_snapshot.',
+    schema: obj({ ...WEB_TARGET }) },
+  web_click: { description: 'Click a DOM element: ref ("@w3" from the last web_snapshot), CSS selector, or visible text. Scrolls it into view and sends a real mouse click (trusted event). Returns the refreshed web snapshot unless observe:"none".',
+    schema: obj({ ref: str('element ref like "@w3" from the LAST web_snapshot'), selector: str('CSS selector (first match)'), text: str('visible text / aria-label / value of the element (interactive elements preferred; exact matches win)'), ...WEB_TARGET, ...WEB_OBS }) },
+  web_type: { description: 'Type into a DOM input/textarea/contenteditable (ref, selector or text; focused field if none given). Uses Input.insertText, so any Unicode (Korean, emoji) works without ADBKeyboard. Returns the refreshed web snapshot unless observe:"none".',
+    schema: obj({ text: { type: 'string' }, ref: str('element ref like "@w3"'), selector: str('CSS selector'), label: str('visible label/placeholder of the field'), clear: bool('clear the field first'), enter: bool('press Enter afterwards'), ...WEB_TARGET, ...WEB_OBS }, ['text']) },
+  web_eval: { description: 'Evaluate a JavaScript expression in the page (awaits promises, returns JSON-serializable values by value). Use for anything the other web_* tools do not cover: scrolling (window.scrollBy), reading text (document.body.innerText), form values, navigation (location.href=...).',
+    schema: obj({ expression: { type: 'string' }, ...WEB_TARGET }, ['expression']) },
   list_apps: { description: 'List installed packages (user-installed by default).',
     schema: obj({ system: bool('include system packages'), filter: str('substring filter') }) },
   shell: { description: 'Run a shell command on the device as the adb shell user (uid 2000): am, pm, cmd, settings, dumpsys, content, input, svc, ... Returns output and exit code.',
@@ -282,15 +308,231 @@ export function pngSize(buf) {
   return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
 
+// ---------------------------------------------------------------- Chrome DevTools Protocol (WebView / Chrome), zero dependencies
+
+/** one WebSocket frame (RFC 6455). Clients must mask (`mask: true`), servers must not. */
+export function wsFrame(payload, { mask = true, opcode = 1 } = {}) {
+  const data = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf8');
+  const n = data.length;
+  const head = n < 126 ? Buffer.from([0x80 | opcode, (mask ? 0x80 : 0) | n])
+    : n < 65536 ? Buffer.from([0x80 | opcode, (mask ? 0x80 : 0) | 126, n >> 8, n & 255])
+    : (() => { const b = Buffer.alloc(10); b[0] = 0x80 | opcode; b[1] = (mask ? 0x80 : 0) | 127; b.writeBigUInt64BE(BigInt(n), 2); return b; })();
+  if (!mask) return Buffer.concat([head, data]);
+  const key = crypto.randomBytes(4), body = Buffer.from(data);
+  for (let i = 0; i < n; i++) body[i] ^= key[i & 3];
+  return Buffer.concat([head, key, body]);
+}
+
+/** incremental frame parser: push(chunk) -> [{ opcode, payload }] for each complete message (fragments are joined; control frames come through as-is) */
+export function wsParser() {
+  let buf = Buffer.alloc(0), frag = null;
+  return chunk => {
+    buf = Buffer.concat([buf, chunk]);
+    const out = [];
+    for (;;) {
+      if (buf.length < 2) break;
+      let len = buf[1] & 127, off = 2;
+      if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; }
+      else if (len === 127) { if (buf.length < 10) break; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+      const masked = (buf[1] & 128) !== 0;
+      if (buf.length < off + (masked ? 4 : 0) + len) break;
+      const key = masked ? buf.subarray(off, off + 4) : null;
+      if (masked) off += 4;
+      const payload = Buffer.from(buf.subarray(off, off + len));
+      if (key) for (let i = 0; i < len; i++) payload[i] ^= key[i & 3];
+      const fin = (buf[0] & 128) !== 0, op = buf[0] & 15;
+      buf = buf.subarray(off + len);
+      if (op >= 8) { out.push({ opcode: op, payload }); continue; }
+      if (op !== 0) frag = { opcode: op, parts: [] };
+      if (!frag) continue;
+      frag.parts.push(payload);
+      if (fin) { out.push({ opcode: frag.opcode, payload: Buffer.concat(frag.parts) }); frag = null; }
+    }
+    return out;
+  };
+}
+
+/**
+ * WebSocket client -> { send(text), close(), onMessage(fn), onClose(fn) }.
+ * Uses node's built-in WebSocket (node >= 22) unless CONTROL_WS=minimal or it does not exist; then a ~40-line client over net.
+ */
+export function openWs(url, { builtin = typeof WebSocket === 'function' } = {}) {
+  if (builtin) return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url); let onMsg = () => {}, onClose = () => {}, opened = false;
+    ws.onopen = () => { opened = true; resolve({ send: t => ws.send(t), close: () => { try { ws.close(); } catch {} }, onMessage: f => { onMsg = f; }, onClose: f => { onClose = f; } }); };
+    ws.onmessage = e => onMsg(String(e.data));
+    ws.onerror = () => { if (!opened) reject(new Error(`websocket connect failed: ${url}`)); };
+    ws.onclose = () => { if (!opened) reject(new Error(`websocket closed before open: ${url}`)); else onClose(); };
+  });
+  return new Promise((resolve, reject) => {
+    const u = new URL(url), sock = net.connect({ host: u.hostname, port: Number(u.port) || 80 });
+    const key = crypto.randomBytes(16).toString('base64'), parse = wsParser();
+    let head = Buffer.alloc(0), upgraded = false, onMsg = () => {}, onClose = () => {};
+    const api = { send: t => sock.write(wsFrame(t, { mask: true })), close: () => { try { sock.write(wsFrame(Buffer.alloc(0), { mask: true, opcode: 8 })); } catch {} sock.destroy(); }, onMessage: f => { onMsg = f; }, onClose: f => { onClose = f; } };
+    const frames = chunk => { for (const f of parse(chunk)) {
+      if (f.opcode === 1 || f.opcode === 2) onMsg(f.payload.toString('utf8'));
+      else if (f.opcode === 9) sock.write(wsFrame(f.payload, { mask: true, opcode: 10 }));
+      else if (f.opcode === 8) sock.end();
+    } };
+    sock.on('connect', () => sock.write(`GET ${u.pathname}${u.search} HTTP/1.1\r\nHost: ${u.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+    sock.on('data', chunk => {
+      if (upgraded) return frames(chunk);
+      head = Buffer.concat([head, chunk]);
+      const end = head.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      if (!/^HTTP\/1\.1 101/.test(head.toString('latin1', 0, end))) { sock.destroy(); return reject(new Error('websocket upgrade refused: ' + head.toString('latin1', 0, Math.min(end, 80)))); }
+      upgraded = true; resolve(api);
+      const rest = head.subarray(end + 4); if (rest.length) frames(rest);
+    });
+    sock.on('error', e => { if (!upgraded) reject(e); });
+    sock.on('close', () => { if (upgraded) onClose(); else reject(new Error('websocket closed before upgrade')); });
+  });
+}
+
+/** one JSON GET on 127.0.0.1:port */
+const httpJson = (port, path) => new Promise((resolve, reject) => {
+  const req = http.get({ host: '127.0.0.1', port, path, timeout: 5000 }, res => {
+    const parts = []; res.on('data', c => parts.push(c));
+    res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(parts).toString())); } catch (e) { reject(new Error(`devtools ${path}: bad response`)); } });
+  });
+  req.on('timeout', () => req.destroy(new Error(`devtools ${path}: timeout`)));
+  req.on('error', reject);
+});
+
+/** devtools sockets from /proc/net/unix text -> ["webview_devtools_remote_123", "chrome_devtools_remote", ...] */
+export function parseDevtoolsSockets(out) {
+  return [...new Set([...String(out).matchAll(/@([\w.\-]*devtools_remote[\w.\-]*)/g)].map(m => m[1]))];
+}
+
+/** In-page script: lists the visible interactive elements and stores them in window.__droidRefs (refs @w1.. index into it). Returns a JSON string. */
+export const WEB_SNAPSHOT_JS = `(() => {
+  const SEL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=switch],[role=option],[role=combobox],[role=textbox],[onclick],[tabindex]:not([tabindex="-1"]),[contenteditable=""],[contenteditable="true"]';
+  const vw = innerWidth, vh = innerHeight;
+  const clip = (s, n) => { s = String(s || '').replace(/\\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+  const rectOf = e => { const r = e.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return null; const cs = getComputedStyle(e); return cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0' ? null : r; };
+  const roleOf = e => {
+    const t = e.tagName.toLowerCase(), r = e.getAttribute('role');
+    if (r) return r === 'textbox' ? 'input' : r;
+    if (t === 'a') return 'link';
+    if (t === 'select') return 'select';
+    if (t === 'textarea' || e.isContentEditable) return 'input';
+    if (t === 'input') { const ty = (e.type || 'text').toLowerCase(); return ['button', 'submit', 'reset', 'image'].includes(ty) ? 'button' : ['checkbox', 'radio'].includes(ty) ? ty : ty === 'range' ? 'slider' : 'input'; }
+    return 'button';
+  };
+  const labelOf = e => {
+    const t = e.tagName.toLowerCase(), ty = (e.type || '').toLowerCase();
+    const lab = e.labels && e.labels[0] ? e.labels[0].innerText : '';
+    const byId = e.getAttribute('aria-labelledby') ? [...e.getAttribute('aria-labelledby').split(' ')].map(i => (document.getElementById(i) || {}).innerText).join(' ') : '';
+    return clip(e.getAttribute('aria-label') || byId || (t === 'input' || t === 'textarea' || t === 'select' ? (ty === 'password' ? '' : (ty === 'button' || ty === 'submit' ? e.value : '')) || lab || e.placeholder || e.name || '' : e.innerText || e.textContent) || e.alt || e.title || lab || e.name || e.id, 60);
+  };
+  const all = [...document.querySelectorAll(SEL)];
+  const seen = new Set(), cands = [];
+  for (const e of all) {
+    const r = rectOf(e); if (!r || seen.has(e)) continue; seen.add(e);
+    const inView = r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
+    cands.push({ e, r, inView });
+  }
+  const shownAll = cands.filter(c => c.inView), off = cands.length - shownAll.length;
+  const shown = shownAll.slice(0, ${MAX_LIST});
+  window.__droidRefs = shown.map(c => c.e);
+  const items = shown.map(c => {
+    const e = c.e, flags = [];
+    if (e.checked) flags.push('checked');
+    if (e.disabled) flags.push('disabled');
+    if (e.readOnly) flags.push('readonly');
+    if (e.required) flags.push('required');
+    if (document.activeElement === e) flags.push('focused');
+    if ((e.type || '') === 'password') flags.push('password');
+    const v = e.tagName === 'SELECT' ? (e.options[e.selectedIndex] || {}).text : (['input', 'textarea'].includes(e.tagName.toLowerCase()) && e.type !== 'password' && !['button', 'submit', 'checkbox', 'radio'].includes(e.type) ? e.value : '');
+    return { role: roleOf(e), label: labelOf(e), value: clip(v, 40), flags, x: Math.round(c.r.left + c.r.width / 2), y: Math.round(c.r.top + c.r.height / 2) };
+  });
+  const texts = [], tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+  for (let n = tw.nextNode(); n && texts.length < 25; n = tw.nextNode()) {
+    const p = n.parentElement; if (!p || p.closest('a,button,select,textarea,script,style,noscript,[role=button],[role=link]')) continue;
+    const v = clip(n.nodeValue, 50); if (!v) continue;
+    const r = rectOf(p); if (!r || !(r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw)) continue;
+    if (!texts.includes(v)) texts.push(v);
+  }
+  return JSON.stringify({ url: location.href, title: document.title, vw, vh, scrollY: Math.round(scrollY), items, offscreen: off, hidden: shownAll.length - shown.length, texts });
+})()`;
+
+/** Text form of a web snapshot, same style as the native list. */
+export function formatWebSnapshot(s) {
+  const seen = new Map();
+  for (const i of s.items) { const k = `${i.role}|${i.label}`; seen.set(k, (seen.get(k) || 0) + 1); }
+  const idx = new Map();
+  const out = [`web ${s.url} "${clip(s.title, 60)}" viewport ${s.vw}x${s.vh} (CSS px) scrollY ${s.scrollY} | ${s.items.length} interactive (web_click ref:"@wN")`];
+  s.items.forEach((i, k) => {
+    const key = `${i.role}|${i.label}`; let hint = '';
+    if (seen.get(key) > 1) { idx.set(key, (idx.get(key) || 0) + 1); hint = ` (#${idx.get(key)})`; }
+    const name = i.label ? ` ${q(i.label)}` : '';
+    const val = i.value && i.value !== i.label ? ` = ${q(i.value)}` : '';
+    out.push(`@w${k + 1} ${i.role}${name}${hint}${val} [${i.x},${i.y}]${i.flags.length ? ' ' + i.flags.join(',') : ''}`);
+  });
+  if (s.hidden) out.push(`(+${s.hidden} more in view not listed)`);
+  if (s.offscreen) out.push(`(+${s.offscreen} interactive elements off-screen: web_eval "window.scrollBy(0, innerHeight*0.8)" or use selector/text)`);
+  if (s.texts.length) out.push('text: ' + s.texts.map(q).join(' | '));
+  return out.join('\n');
+}
+
+/** In-page helper source: (spec) -> element, spec = { ref: "@w3" | selector | text }. */
+const WEB_RESOLVE_JS = `((spec) => {
+  if (spec.ref !== undefined && spec.ref !== null && spec.ref !== '') {
+    const m = /^@?w(\\d+)$/i.exec(String(spec.ref).trim());
+    if (!m) throw new Error('invalid ref: ' + spec.ref + ' (expected like "@w3", from web_snapshot)');
+    const el = (window.__droidRefs || [])[Number(m[1]) - 1];
+    if (!el) throw new Error('unknown ref @w' + m[1] + ': ' + ((window.__droidRefs || []).length ? 'the last snapshot has @w1..@w' + window.__droidRefs.length : 'no snapshot taken in this page') + '. Take a new web_snapshot');
+    if (!el.isConnected) throw new Error('stale ref @w' + m[1] + ': the page changed and it is no longer in the DOM. Take a new web_snapshot');
+    return el;
+  }
+  if (spec.selector) { const el = document.querySelector(spec.selector); if (!el) throw new Error('no element matches selector ' + spec.selector); return el; }
+  if (spec.text) {
+    const needle = String(spec.text).toLowerCase();
+    const cand = [...document.querySelectorAll('a,button,input,select,textarea,summary,label,[role],[onclick],[tabindex],h1,h2,h3,h4,li,span,div,p')];
+    let best = null, bs = 0;
+    for (const e of cand) {
+      const r = e.getBoundingClientRect(); if (r.width < 1 || r.height < 1) continue;
+      const vals = [e.getAttribute('aria-label'), e.placeholder, e.value, e.innerText, e.title].filter(Boolean).map(v => String(v).replace(/\\s+/g, ' ').trim().toLowerCase());
+      let s = vals.some(v => v === needle) ? 4 : vals.some(v => v.includes(needle)) ? 2 : 0;
+      if (!s) continue;
+      if (e.matches('a,button,input,select,textarea,summary,[role=button],[role=link],[onclick]')) s += 1;
+      s -= Math.min(1, (e.innerText || '').length / 2000);   // prefer the innermost / smallest match
+      if (s > bs) { bs = s; best = e; }
+    }
+    if (!best) throw new Error('no element with text ' + JSON.stringify(spec.text));
+    return best;
+  }
+  throw new Error('give ref, selector or text');
+})`;
+
+const WEB_SEP = '--droid-web--';
 const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const ADB_IME = 'com.android.adbkeyboard/.AdbIME';
 const WAKE_CMD = `dumpsys power | grep -q 'mWakefulness=Awake' || { input keyevent 224; sleep 0.5; wm dismiss-keyguard >/dev/null 2>&1; echo woke; }`;
 const GONE = /device offline|device '[^']*' not found|device not found|no devices\/emulators found|error: closed|connection reset/i;
 const describeQuery = a => [a.text != null && `text "${a.text}"`, a.id != null && `id "${a.id}"`].filter(Boolean).join(' + ');
 
-export function createControlMcp({ exec = defaultExec, env = process.env, sleep = t => new Promise(r => setTimeout(r, t)), now = Date.now } = {}) {
+export function createControlMcp({ exec = defaultExec, env = process.env, sleep = t => new Promise(r => setTimeout(r, t)), now = Date.now, log = m => process.stderr.write(m + '\n') } = {}) {
   const adbBin = env.ADB_BIN || 'adb';
-  const maxSide = env.CONTROL_MAX_SIDE === undefined || env.CONTROL_MAX_SIDE === '' ? 1280 : Number(env.CONTROL_MAX_SIDE) || 0;
+  const maxSide = env.CONTROL_MAX_SIDE === undefined || env.CONTROL_MAX_SIDE === '' ? 960 : Number(env.CONTROL_MAX_SIDE) || 0;
+  const jpegQuality = Math.min(100, Math.max(1, Number(env.CONTROL_JPEG_QUALITY) || 60));
+  const adaptiveSettle = env.CONTROL_SETTLE_ADAPTIVE !== '0';
+  const timingOn = env.CONTROL_TIMING === '1';
+  const tstore = new AsyncLocalStorage();
+  /** records how long `fn` took under `label` in the current tool call's timing (no-op unless CONTROL_TIMING=1) */
+  const timed = async (label, fn) => {
+    const rec = tstore.getStore();
+    if (!rec) return fn();
+    const t0 = performance.now();
+    try { return await fn(); } finally { const p = rec.parts.get(label) ?? rec.parts.set(label, { ms: 0, n: 0 }).get(label); p.ms += performance.now() - t0; p.n++; }
+  };
+  const labelOf = (bin, args) => {
+    const a = args[0] === '-s' ? args.slice(2) : args;
+    if (bin !== adbBin) return bin;
+    if (a[0] === 'exec-out') return a[1] === 'uiautomator' ? 'adb:uiautomator-dump' : `adb:${a[1]}`;
+    if (a[0] === 'shell') return `adb:shell ${String(a[1] || '').trim().split(/\s+/)[0].slice(0, 24)}`;
+    return `adb:${a[0]}`;
+  };
   const defaultObserve = OBSERVE.includes(env.CONTROL_OBSERVE) ? env.CONTROL_OBSERVE : 'auto';
   const settleEnv = Number(env.CONTROL_SETTLE_MS || NaN);
   const defaultSettle = Number.isFinite(settleEnv) && settleEnv >= 0 ? settleEnv : 700;
@@ -302,7 +544,7 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   let snap = { items: new Map(), dirty: false };   // ref map of the LAST ui_tree/observe; dirty = an action ran since
 
   async function run(bin, args, opts) {
-    try { return await exec(bin, args, opts); } catch (e) {
+    try { return await timed(labelOf(bin, args), () => exec(bin, args, opts)); } catch (e) {
       if (e?.code === 'ENOENT') throw new Error(`${bin} not found: run control/setup.sh (Termux: pkg install android-tools) or set ADB_BIN`);
       if (e?.killed || e?.code === 'ETIMEDOUT') throw new Error(`timeout running ${bin} ${args.slice(0, 4).join(' ')}`);
       throw e;
@@ -349,9 +591,9 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     }
   }
 
-  /** Turns the screen on (and dismisses an insecure keyguard) if it is off. Checked at most every 3 s. */
+  /** Turns the screen on (and dismisses an insecure keyguard) if it is off. Checked at most every 5 s. */
   async function awake() {
-    if (!autoWake || now() - awakeAt < 3000) return false;
+    if (!autoWake || now() - awakeAt < 5000) return false;
     let woke = false;
     try { woke = (await sh(WAKE_CMD, { timeout: 10000 })).includes('woke'); } catch {}
     awakeAt = now();
@@ -415,12 +657,12 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   }
   async function uiNodes(all) {
     const { xml, scale: s } = await uiXml();
-    return { scale: s, nodes: parseUiTree(xml, { scale: s, all }) };
+    return { scale: s, nodes: await timed('parse', async () => parseUiTree(xml, { scale: s, all })) };
   }
   /** dumps the UI, builds the ref list and (unless `store` is false) makes it the LAST snapshot that @refs resolve against */
   async function snapshot({ store = true, xml: given } = {}) {
     const { xml, scale: s } = given ?? await uiXml();
-    const built = buildSnapshot(xml, { scale: s });
+    const built = await timed('parse', async () => buildSnapshot(xml, { scale: s }));
     if (store) snap = { items: new Map(built.items.map(i => [i.ref, i])), dirty: false };
     return { ...built, scale: s, xml, sparse: built.tappable < SPARSE_BELOW,
       text: formatSnapshot(built, s) + (built.tappable < SPARSE_BELOW ? `\nnote: only ${built.tappable} tappable element(s) in the UI tree (game/canvas/Flutter/WebView/secure window?): use screenshot and tap x,y` : '') };
@@ -445,6 +687,143 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     return adbKeyboard;
   }
 
+  // ---- web (CDP) ---------------------------------------------------------------------------------------------
+  const forwards = new Map();   // `${serial}|${socket}` -> local tcp port
+  const useBuiltinWs = env.CONTROL_WS !== 'minimal' && typeof WebSocket === 'function';
+
+  /** devtools sockets on the device with the owning package where it can be told: [{ socket, pid, pkg }] */
+  async function devtoolsSockets() {
+    const out = await sh(`cat /proc/net/unix 2>/dev/null; echo ${WEB_SEP}; for p in $(grep -o 'devtools_remote_[0-9]*' /proc/net/unix | sed 's/.*_//' | sort -u); do echo "$p $(tr '\\0' ' ' </proc/$p/cmdline 2>/dev/null)"; done`, { timeout: 10000 });
+    const [unix, pids = ''] = out.split(WEB_SEP);
+    const pkgOf = new Map(pids.split('\n').map(l => /^(\d+)\s+(\S+)/.exec(l.trim())).filter(Boolean).map(m => [m[1], m[2]]));
+    return parseDevtoolsSockets(unix).map(socket => {
+      const pid = (/_(\d+)$/.exec(socket) || [])[1];
+      return { socket, pid, pkg: pid ? pkgOf.get(pid) : /^chrome_/.test(socket) ? 'com.android.chrome' : undefined };
+    });
+  }
+  async function focusedPackage() {
+    try { return (/mCurrentFocus=Window\{\S+ \S+ ([\w.]+)\//.exec(await sh('dumpsys window 2>/dev/null | grep -m1 mCurrentFocus')) || [])[1]; } catch { return undefined; }
+  }
+  /** picks the devtools socket: explicit socket, else the package, else the foreground app, else Chrome, else the only/first one */
+  let sockCache = null;   // { key, at, pick }: the pick is reused for 5 s (saves a /proc scan + dumpsys per call); dropped when the page cannot be reached
+  async function pickSocket(a) {
+    const ck = `${a.socket || ''}|${a.package || ''}`;
+    if (sockCache && sockCache.key === ck && now() - sockCache.at < 5000) return sockCache.pick;
+    const pick = await pickSocketFresh(a);
+    sockCache = { key: ck, at: now(), pick };
+    return pick;
+  }
+  async function pickSocketFresh(a) {
+    const socks = await devtoolsSockets();
+    if (!socks.length) throw new Error('no WebView/Chrome devtools socket on the device (checked /proc/net/unix). The page must be in Chrome, or in an app that called WebView.setWebContentsDebuggingEnabled(true) (debuggable apps have it on); the webview_shell test app only exposes it while a page is open. Native screens: use ui_tree.');
+    let pick;
+    if (a.socket) pick = socks.find(x => x.socket === String(a.socket));
+    else if (a.package) pick = socks.find(x => x.pkg === String(a.package));
+    else { const fg = await focusedPackage(); pick = (fg && socks.find(x => x.pkg === fg)) || socks.find(x => x.pkg === 'com.android.chrome') || socks[0]; }
+    if (!pick) throw new Error(`no devtools socket for ${a.socket ? 'socket ' + a.socket : 'package ' + a.package}; available: ${JSON.stringify(socks.map(x => x.pkg ? `${x.socket} (${x.pkg})` : x.socket))}`);
+    return pick;
+  }
+  async function forwardPort(socket, fresh) {
+    const key = `${await serial()}|${socket}`;
+    if (!fresh && forwards.has(key)) return forwards.get(key);
+    if (!fresh) {   // reuse a forward left by an earlier run instead of leaking a new one each time
+      const list = String((await adb(['forward', '--list'], { timeout: 8000 }).catch(() => ({ stdout: '' }))).stdout).split('\n').filter(l => l.startsWith(key.split('|')[0] + ' ')).join('\n');
+      const m = new RegExp(`\\btcp:(\\d+)\\s+localabstract:${socket.replace(/[^\w]/g, '\\$&')}\\s*$`, 'm').exec(list);
+      if (m) { forwards.set(key, Number(m[1])); return Number(m[1]); }
+    }
+    const out = String((await adb(['forward', 'tcp:0', `localabstract:${socket}`], { timeout: 8000 })).stdout).trim();
+    const port = Number(/(\d{2,5})/.exec(out)?.[1]);
+    if (!port) throw new Error('adb forward failed: ' + out);
+    forwards.set(key, port);
+    return port;
+  }
+  async function pageTarget(a) {
+    const pick = await pickSocket(a);
+    let port, list;
+    try { port = await forwardPort(pick.socket); list = await httpJson(port, '/json/list'); } catch {
+      sockCache = null;   // the app may have restarted (new pid/socket): rediscover once, with a fresh forward
+      const again = await pickSocket(a);
+      port = await forwardPort(again.socket, true); list = await httpJson(port, '/json/list');
+      return choosePage(a, again, port, list);
+    }
+    return choosePage(a, pick, port, list);
+  }
+  function choosePage(a, pick, port, list) {
+    const pages = list.filter(t => t.type === 'page' && t.webSocketDebuggerUrl);
+    if (!pages.length) throw new Error(`devtools socket ${pick.socket} has no open pages`);
+    let t;
+    if (a.target === undefined || a.target === null || a.target === '') t = pages[0];
+    else if (/^\d+$/.test(String(a.target))) t = pages[Number(a.target)];
+    else t = pages.find(p => `${p.url} ${p.title}`.toLowerCase().includes(String(a.target).toLowerCase()));
+    if (!t) throw new Error(`no page matching target ${a.target}; pages: ${JSON.stringify(pages.map((p, i) => `${i}: ${clip(p.title, 30)} ${clip(p.url, 60)}`))}`);
+    // the forwarded port is local: rewrite whatever host/port the browser reported
+    const wsUrl = t.webSocketDebuggerUrl.replace(/^ws:\/\/[^/]+/, `ws://127.0.0.1:${port}`);
+    return { wsUrl, page: t, socket: pick.socket };
+  }
+  /** one CDP connection for the duration of `fn(send)`; send(method, params) -> result */
+  async function withPage(a, fn) {
+    const { wsUrl } = await timed('cdp:discover', () => pageTarget(a));
+    const ws = await timed('cdp:connect', () => openWs(wsUrl, { builtin: useBuiltinWs }));
+    const pend = new Map(); let nid = 0;
+    ws.onMessage(raw => {
+      let m; try { m = JSON.parse(raw); } catch { return; }
+      const w = m.id !== undefined && pend.get(m.id);
+      if (!w) return;
+      pend.delete(m.id); clearTimeout(w.timer);
+      m.error ? w.rej(new Error(`${m.error.message}${m.error.data ? ': ' + m.error.data : ''}`)) : w.res(m.result);
+    });
+    ws.onClose(() => { for (const w of pend.values()) { clearTimeout(w.timer); w.rej(new Error('devtools connection closed')); } pend.clear(); });
+    const send = (method, params = {}) => timed('cdp:' + method, () => new Promise((res, rej) => {
+      const i = ++nid, timer = setTimeout(() => { pend.delete(i); rej(new Error(`devtools timeout: ${method}`)); }, 20000);
+      pend.set(i, { res, rej, timer });
+      ws.send(JSON.stringify({ id: i, method, params }));
+    }));
+    try { return await fn(send); } finally { ws.close(); }
+  }
+  /** Runtime.evaluate by value; page exceptions become errors */
+  async function evalIn(send, expression, extra = {}) {
+    const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture: true, ...extra });
+    if (r.exceptionDetails) throw new Error(String(r.exceptionDetails.exception?.description || r.exceptionDetails.exception?.value || r.exceptionDetails.text).split('\n')[0].replace(/^Error: /, ''));
+    return r.result?.value;
+  }
+  const webSpec = (a, typing) => ({ ref: a.ref, selector: a.selector, text: typing ? a.label : a.text });
+  const hasSpec = sp => [sp.ref, sp.selector, sp.text].some(v => v !== undefined && v !== null && v !== '');
+  const takeSnapshot = async send => formatWebSnapshot(JSON.parse(await evalIn(send, WEB_SNAPSHOT_JS)));
+  /** follow-up content for a web action: the result plus (unless observe:"none") a fresh snapshot */
+  async function webResult(a, send, result) {
+    const content = [{ type: 'text', text: JSON.stringify(result) }];
+    if (a.observe !== 'none') {
+      await sleep(ms(a.settleMs, 300, 10000));
+      content.push({ type: 'text', text: await takeSnapshot(send) });
+    }
+    return { content };
+  }
+
+  /** md5 of the current frame computed ON the device (nothing is transferred, ~150 ms); null when screencap cannot be read (secure window, no md5sum) */
+  async function frameHash() {
+    try {
+      const m = /^([0-9a-f]{32})\b/.exec((await sh('screencap | md5sum', { timeout: 6000 })).trim());
+      return m && m[1] !== 'd41d8cd98f00b204e9800998ecf8427e' ? m[1] : null;
+    } catch { return null; }
+  }
+  /** waits up to `maxMs` for the screen to stop changing (two identical frames in a row); falls back to the fixed wait when frames cannot be read */
+  async function settle(maxMs) {
+    if (maxMs <= 0) return;
+    await timed('settle', async () => {
+      const t0 = now();
+      if (!adaptiveSettle) return sleep(maxMs);
+      await sleep(Math.min(120, maxMs));   // let the input event start its effect
+      let prev = await frameHash();
+      if (prev === null) return sleep(Math.max(0, maxMs - (now() - t0)));
+      while (now() - t0 < maxMs) {
+        await sleep(Math.min(80, Math.max(0, maxMs - (now() - t0))));
+        const h = await frameHash();
+        if (h === null || h === prev) return;
+        prev = h;
+      }
+    });
+  }
+
   const impl = {
     async screenshot() {
       const png = (await adb(['exec-out', 'screencap', '-p'], { timeout: 20000 })).stdout;
@@ -453,7 +832,7 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
       let data = png, mimeType = 'image/png', s = await scale();
       if (s > 1) {
         try {
-          data = (await exec(resizer, ['png:-', '-resize', `${maxSide}x${maxSide}>`, '-quality', '80', 'jpg:-'], { timeout: 20000, input: png })).stdout;
+          data = (await timed('resize', () => exec(resizer, ['png:-', '-resize', `${maxSide}x${maxSide}>`, '-strip', '-quality', String(jpegQuality), 'jpg:-'], { timeout: 20000, input: png }))).stdout;
           if (!data?.length) throw new Error('empty output');
           mimeType = 'image/jpeg';
         } catch { resizer = null; data = png; s = 1; }   // resizer broken: fall back to full-size PNG from now on
@@ -570,12 +949,19 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     async wait_for(a) {
       findElements([], a);   // validates the query
       const timeout = ms(a.timeoutMs, 10000, 120000), start = now();
+      let lastHash = null, last = null, first = true, hashOk = false;
       for (;;) {
-        const { nodes } = await uiNodes(true);
+        // first look: dump at once. Later looks: a cheap frame hash first, the (slow) uiautomator dump only reruns when the screen actually changed
+        const h = first ? null : await frameHash();
+        first = false;
+        let nodes;
+        if (h !== null && h === lastHash && last) nodes = last;
+        else { nodes = (await uiNodes(true)).nodes; last = nodes; lastHash = h; }
         const hits = findElements(nodes, a);
+        hashOk ||= h !== null;
         if (a.gone ? !hits.length : hits.length) return { ok: true, waitedMs: now() - start, ...(a.gone ? {} : { element: hits[0] }) };
         if (now() - start >= timeout) throw new Error(`timeout after ${timeout}ms waiting for ${describeQuery(a)}${a.gone ? ' to disappear' : ''}; visible: ${JSON.stringify(labels(nodes))}`);
-        await sleep(400);
+        await sleep(hashOk ? 100 : 400);
       }
     },
     async batch(a) {
@@ -601,6 +987,40 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
       }
       const summary = { completed: results.filter(r => !r.error).length, total: a.steps.length, results };
       return { content: [{ type: 'text', text: JSON.stringify(summary) }, ...images], ...(failed ? { isError: true } : {}) };
+    },
+    async web_snapshot(a) { return withPage(a, async send => ({ content: [{ type: 'text', text: await takeSnapshot(send) }] })); },
+    async web_eval(a) {
+      return withPage(a, async send => {
+        const v = await evalIn(send, String(a.expression));
+        const text = v === undefined ? 'undefined' : typeof v === 'string' ? v : JSON.stringify(v);
+        return { content: [{ type: 'text', text: text.length > 20000 ? text.slice(0, 20000) + `… (+${text.length - 20000} chars)` : text }] };
+      });
+    },
+    async web_click(a) {
+      const sp = webSpec(a);
+      if (!hasSpec(sp)) throw new Error('give ref, selector or text');
+      return withPage(a, async send => {
+        const info = JSON.parse(await evalIn(send, `(() => { const el = ${WEB_RESOLVE_JS}(${JSON.stringify(sp)}); el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); const r = el.getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: Math.round(r.width), h: Math.round(r.height), tag: el.tagName.toLowerCase(), label: (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.id || '').replace(/\\s+/g, ' ').trim().slice(0, 60) }); })()`));
+        if (info.w < 1 || info.h < 1) throw new Error('element has no size on screen (hidden?)');
+        const m = { x: info.x, y: info.y, button: 'left', clickCount: 1 };
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: info.x, y: info.y });
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...m });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...m });
+        return webResult(a, send, { ok: true, clicked: `${info.tag} ${q(info.label)}`, at: [info.x, info.y] });
+      });
+    },
+    async web_type(a) {
+      const sp = webSpec(a, true), text = String(a.text);
+      return withPage(a, async send => {
+        const focus = hasSpec(sp)
+          ? `const el = ${WEB_RESOLVE_JS}(${JSON.stringify(sp)}); el.scrollIntoView({ block: 'center', behavior: 'instant' }); el.focus();`
+          : `const el = document.activeElement; if (!el || el === document.body) throw new Error('no focused field: give ref, selector or label');`;
+        const clear = a.clear ? `if (el.select) el.select(); else document.execCommand('selectAll'); document.execCommand('delete');` : '';
+        const tag = await evalIn(send, `(() => { ${focus} ${clear} return el.tagName.toLowerCase() + (el.type ? ':' + el.type : ''); })()`);
+        if (text) await send('Input.insertText', { text });
+        if (a.enter) for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) });
+        return webResult(a, send, { ok: true, typed: text.length, into: tag });
+      });
     },
     async list_apps(a) {
       const out = await sh(`pm list packages${a.system ? '' : ' -3'}`, { timeout: 20000 });
@@ -631,7 +1051,7 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   };
 
   async function observe(mode, settleMs) {
-    await sleep(settleMs);
+    await settle(settleMs);
     if (mode === 'screenshot') return (await impl.screenshot()).content;
     let sn;
     try { sn = await snapshot(); } catch (e) {
@@ -653,14 +1073,23 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     const mode = t.action ? (args.observe ?? defaultObserve) : 'none';
     if (!OBSERVE.includes(mode)) throw new Error(`invalid observe: ${args.observe} (use ${OBSERVE.join(', ')})`);
     const settle = mode === 'none' ? 0 : ms(args.settleMs, defaultSettle, 10000);
-    if (t.wake) await awake();
-    const r = await impl[name](args);
-    if (t.action) snap.dirty = true;   // the screen may have changed: refs must be re-verified until the next snapshot
-    if (mode === 'none') return r;
-    if (r?.isError) return r;   // a failed batch: do not bury the error under an observation
-    const content = r?.content ? [...r.content] : [{ type: 'text', text: JSON.stringify(r) }];
-    content.push(...await observe(mode, settle));
-    return { content };
+    const rec = timingOn && !tstore.getStore() ? { parts: new Map(), t0: performance.now() } : null;   // nested batch steps fold into the batch's record
+    const go = async () => {
+      if (t.wake) await awake();
+      const r = await impl[name](args);
+      if (t.action) snap.dirty = true;   // the screen may have changed: refs must be re-verified until the next snapshot
+      if (mode === 'none') return r;
+      if (r?.isError) return r;   // a failed batch: do not bury the error under an observation
+      const content = r?.content ? [...r.content] : [{ type: 'text', text: JSON.stringify(r) }];
+      content.push(...await observe(mode, settle));
+      return { content };
+    };
+    if (!rec) return go();
+    try { return await tstore.run(rec, go); } finally {
+      const total = performance.now() - rec.t0;
+      const parts = [...rec.parts].sort((a, b) => b[1].ms - a[1].ms).map(([k, v]) => `${k}=${v.ms.toFixed(0)}ms${v.n > 1 ? `×${v.n}` : ''}`);
+      log(`[timing] ${name} total=${total.toFixed(0)}ms | ${parts.join(' ') || '-'}`);
+    }
   }
 
   const ok = (id, result) => ({ jsonrpc: '2.0', id, result });
