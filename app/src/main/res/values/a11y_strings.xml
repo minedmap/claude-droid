@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="a11y_service_desc">Optional. Lets the phone-control MCP read the current screen tree quickly over 127.0.0.1 (token-protected). Read-only: it never taps, types or records.</string>
+</resources>

@@ -1,8 +1,11 @@
 import { test } from 'node:test';
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createControlMcp, TOOLS, INSTRUCTIONS, parseDevices, parseMdns, parseUiTree, findElements, pngSize } from '../control-mcp.mjs';
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { createControlMcp, TOOLS, INSTRUCTIONS, parseDevices, parseMdns, parseUiTree, buildSnapshot, formatSnapshot, findElements, pngSize, SPARSE_BELOW, wsFrame, wsParser, parseDevtoolsSockets, formatWebSnapshot } from '../control-mcp.mjs';
 
 const script = fileURLToPath(new URL('../control-mcp.mjs', import.meta.url));
 const fakeAdb = fileURLToPath(new URL('./fake-adb.sh', import.meta.url));
@@ -36,7 +39,7 @@ function fake({ devices = 'List of devices attached\nlocalhost:40123\tdevice\n\n
     if (rest[0] === 'exec-out' && rest[1] === 'uiautomator') return out(over.uiautomator ?? XML);
     if (rest[0] === 'shell') {
       const cmd = rest[1];
-      for (const [k, v] of Object.entries(over.shell || {})) if (cmd.startsWith(k)) { if (v instanceof Error) throw v; return out(v); }
+      for (const [k, v] of Object.entries(over.shell || {})) if (cmd.startsWith(k)) { if (v instanceof Error) throw v; return out(typeof v === 'function' ? v() : v); }
       if (cmd === 'wm size') return out('Physical size: 1080x2400\n');
       if (cmd.startsWith('pm list packages')) return out('package:org.b\npackage:com.a\n');
       if (cmd.startsWith('getprop')) return out('samsung\nSM-S911N\n14\n34\n  mCurrentFocus=Window{abc u0 com.a/com.a.Main}\nmWakefulness=Awake\n  level: 87\n');
@@ -46,7 +49,7 @@ function fake({ devices = 'List of devices attached\nlocalhost:40123\tdevice\n\n
   };
   return { exec, calls, shells: () => calls.filter(c => c.args[2] === 'shell').map(c => c.args[3]) };
 }
-const mk = (f, env = {}, clock = { t: 0 }) => createControlMcp({ exec: f.exec, env: { CONTROL_AUTO_WAKE: '0', ...env },
+const mk = (f, env = {}, clock = { t: 0 }) => createControlMcp({ exec: f.exec, env: { CONTROL_AUTO_WAKE: '0', CONTROL_OBSERVE: 'none', ...env },
   now: () => clock.t, sleep: async d => { clock.t += d; (clock.sleeps ||= []).push(d); } });
 const text = r => JSON.parse(r.result.content.find(c => c.type === 'text').text);
 
@@ -58,12 +61,12 @@ test('initialize + tools/list', async () => {
   assert.equal(i.result.instructions, INSTRUCTIONS); assert.match(INSTRUCTIONS, /autonomously/);
   const l = await m.handle(rpc('tools/list'));
   assert.deepEqual(l.result.tools.map(t => t.name).sort(),
-    ['batch', 'device_info', 'key', 'list_apps', 'long_press', 'open_app', 'open_url', 'screenshot', 'scroll', 'shell', 'swipe', 'tap', 'tap_element', 'type', 'ui_tree', 'wait_for']);
+    ['batch', 'device_info', 'key', 'list_apps', 'long_press', 'open_app', 'open_url', 'screenshot', 'scroll', 'shell', 'swipe', 'tap', 'tap_element', 'type', 'ui_tree', 'wait_for', 'web_click', 'web_eval', 'web_snapshot', 'web_type']);
   for (const t of l.result.tools) {
     assert.equal(t.inputSchema.type, 'object'); assert.ok(t.description);
-    assert.equal('observe' in t.inputSchema.properties, !!TOOLS[t.name].action, t.name);
+    assert.equal('observe' in t.inputSchema.properties, !!TOOLS[t.name].action || ['web_click', 'web_type'].includes(t.name), t.name);   // web_click/web_type: observe is web|none
   }
-  assert.equal(Object.keys(TOOLS).length, 16);
+  assert.equal(Object.keys(TOOLS).length, 20);
 });
 
 test('notifications get no response; unknown method and tool are errors', async () => {
@@ -87,16 +90,16 @@ test('with ImageMagick: screenshot is downsized and coordinates are scaled back'
   const img = r.result.content.find(c => c.type === 'image');
   assert.equal(img.mimeType, 'image/jpeg');
   assert.equal(Buffer.from(img.data, 'base64').toString(), 'JPEGDATA');
-  assert.deepEqual(text(r), { width: 576, height: 1280, deviceWidth: 1080, deviceHeight: 2400, scale: 1.875 });
+  assert.deepEqual(text(r), { width: 432, height: 960, deviceWidth: 1080, deviceHeight: 2400, scale: 2.5 });
   const resize = f.calls.find(c => c.bin === 'magick' && c.args[0] === 'png:-');
-  assert.ok(resize.args.includes('1280x1280>')); assert.ok(Buffer.isBuffer(resize.opts.input));
-  await m.call('tap', { x: 288, y: 640 });
+  assert.ok(resize.args.includes('960x960>')); assert.deepEqual(resize.args.slice(-3), ['-quality', '60', 'jpg:-']); assert.ok(Buffer.isBuffer(resize.opts.input));
+  await m.call('tap', { x: 216, y: 480 });
   await m.call('swipe', { x1: 100, y1: 1000, x2: 100, y2: 200 });
   await m.call('long_press', { x: 16, y: 16, durationMs: 500 });
   assert.deepEqual(f.shells().filter(s => s.startsWith('input')),
-    ['input tap 540 1200', 'input swipe 188 1875 188 375 300', 'input swipe 30 30 30 30 500']);
-  const t = await m.call('ui_tree', {});
-  assert.deepEqual(t.nodes[0].bounds, [53, 107, 267, 160]);
+    ['input tap 540 1200', 'input swipe 250 2500 250 500 300', 'input swipe 40 40 40 40 500']);
+  const t = await m.call('ui_tree', { all: true });
+  assert.deepEqual(t.nodes[1].bounds, [40, 80, 200, 120]);
 });
 
 test('screenshot without ImageMagick returns the raw PNG at scale 1; CONTROL_MAX_SIDE=0 never probes', async () => {
@@ -126,13 +129,14 @@ test('key: names, numbers, KEYCODE_ names, rejects junk', async () => {
 
 test('ui_tree: filters, decodes entities, falls back to a file dump', async () => {
   const m = mk(fake());
-  const t = await m.call('ui_tree', {});
-  assert.equal(t.count, 2);
-  assert.deepEqual(t.nodes[0], { bounds: [100, 200, 500, 300], center: [300, 250], text: 'Tom & Jerry', id: 'title', class: 'TextView' });
-  assert.deepEqual(t.nodes[1], { bounds: [900, 2200, 1080, 2400], center: [990, 2300], desc: 'Send', id: 'send', class: 'ImageButton', flags: ['clickable', 'disabled'] });
+  const t = await m.call('ui_tree', { all: true }).then(async () => m.call('ui_tree', {}).then(() => parseUiTree(XML)));
+  const full = await m.call('ui_tree', { all: false }); assert.match(full.content[0].text, /^screen 1080x2400/);
+  assert.equal(t.length, 2);
+  assert.deepEqual(t[0], { bounds: [100, 200, 500, 300], center: [300, 250], text: 'Tom & Jerry', id: 'title', class: 'TextView' });
+  assert.deepEqual(t[1], { bounds: [900, 2200, 1080, 2400], center: [990, 2300], desc: 'Send', id: 'send', class: 'ImageButton', flags: ['clickable', 'disabled'] });
   assert.equal((await m.call('ui_tree', { all: true })).count, 3);
   const f = fake({ over: { uiautomator: 'Killed', shell: { 'uiautomator dump': XML } } });
-  assert.equal((await mk(f).call('ui_tree', {})).count, 2);
+  assert.equal((await mk(f).call('ui_tree', { all: true })).count, 3);
   assert.equal(parseUiTree('<node text="x" />').length, 0);   // no bounds -> skipped
 });
 
@@ -180,22 +184,28 @@ test('helpers', () => {
 });
 
 test('stdio: real process against a fake adb binary', async () => {
-  const p = spawn(process.execPath, [script], { env: { ...process.env, ADB_BIN: fakeAdb, CONTROL_MAX_SIDE: '0' }, stdio: ['pipe', 'pipe', 'inherit'] });
+  const p = spawn(process.execPath, [script], { env: { ...process.env, ADB_BIN: fakeAdb, CONTROL_MAX_SIDE: '0', CONTROL_OBSERVE: 'none', CONTROL_SETTLE_MS: '0' }, stdio: ['pipe', 'pipe', 'inherit'] });
   let out = ''; p.stdout.on('data', d => out += d);
   p.stdin.write(JSON.stringify(rpc('initialize', {}, 1)) + '\n');
   p.stdin.write('not json\n');
   p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'key', arguments: { key: 'home' } }, 2)) + '\n');
   p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'shell', arguments: { command: 'exit 3' } }, 3)) + '\n');
+  p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'ui_tree', arguments: {} }, 4)) + '\n');
+  while (!out.includes('"id":4')) await new Promise(r => setTimeout(r, 20));   // refs resolve against the previous snapshot: be sequential like a real client
+  p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'tap_element', arguments: { ref: '@e2', observe: 'ui' } }, 5)) + '\n');
   p.stdin.end();
   const code = await new Promise(r => p.on('close', r));
   assert.equal(code, 0);
   const msgs = out.trim().split('\n').map(l => JSON.parse(l));
-  assert.equal(msgs.length, 4);
+  assert.equal(msgs.length, 6);
   const by = id => msgs.find(m => m.id === id);
   assert.equal(by(1).result.serverInfo.name, 'droid-control');
   assert.equal(by(null).error.code, -32700);
   assert.deepEqual(JSON.parse(by(2).result.content[0].text), { ok: true, keycode: 3 });
   assert.deepEqual(JSON.parse(by(3).result.content[0].text), { exitCode: 3, output: 'fake: exit 3\n' });
+  assert.match(by(4).result.content[0].text, /@e2 button "Search settings" \[980,205\]/);
+  assert.equal(JSON.parse(by(5).result.content[0].text).ref, '@e2');
+  assert.match(by(5).result.content[1].text, /^screen 1080x2400/);
 });
 
 test('tap_element: exact before substring, clickable preferred, index, id, long, no match lists labels', async () => {
@@ -218,14 +228,14 @@ test('tap_element: exact before substring, clickable preferred, index, id, long,
 });
 
 test('observe: action returns the new screen after settling; default from CONTROL_OBSERVE; invalid mode rejected before acting', async () => {
-  const f = fake(), clock = { t: 0 }; const m = mk(f, {}, clock);
+  const f = fake(), clock = { t: 0 }; const m = mk(f, { CONTROL_SETTLE_ADAPTIVE: '0' }, clock);
   const r = await m.handle(rpc('tools/call', { name: 'tap', arguments: { x: 1, y: 2, observe: 'ui', settleMs: 250 } }));
   assert.deepEqual(JSON.parse(r.result.content[0].text), { ok: true });
-  assert.equal(JSON.parse(r.result.content[1].text).screen.count, 2);
+  assert.match(r.result.content[1].text, /^screen 1080x2400 .*\n@e1 button "Send" \[990,2300\] disabled/);
   assert.deepEqual(clock.sleeps, [250]);
   const s = await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('key', { key: 'back' });
   assert.equal(s.content[1].type, 'image');
-  assert.equal((await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('ui_tree', {})).count, 2);   // non-actions never observe
+  assert.equal((await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('ui_tree', {})).content.length, 1);   // non-actions never observe
   const f2 = fake();
   await assert.rejects(mk(f2).call('tap', { x: 1, y: 1, observe: 'video' }), /invalid observe/);
   assert.deepEqual(f2.shells(), []);
@@ -296,7 +306,7 @@ test('batch: runs steps in order, sleep steps, stops at the first failure unless
   assert.equal(c.isError, true);   // errors are not hidden by the final observe
   assert.deepEqual(g.shells(), ['input keyevent 4']);
   const ok = await mk(fake()).call('batch', { observe: 'ui', steps: [{ tool: 'key', args: { key: 'back' } }] });
-  assert.equal(JSON.parse(ok.content.at(-1).text).screen.count, 2);
+  assert.match(ok.content.at(-1).text, /^screen 1080x2400/);
   await assert.rejects(m.call('batch', { steps: [] }), /non-empty/);
 });
 
@@ -354,10 +364,10 @@ test('a different emulator behind the same serial gets a fresh screen size (tran
     devices: () => `List of devices attached\nemulator-5554          device product:x model:y transport_id:${transport}\n`,
     over: { adb: a => a[2] === 'shell' && a[3] === 'wm size' ? `Physical size: ${size}\n` : undefined } });
   const m = mk(f);
-  assert.equal((await m.call('device_info', {})).scale, 2.2313);
+  assert.equal((await m.call('device_info', {})).scale, 2.975);   // 2856 / 960 (hybrid default maxSide 960)
   transport = 2; size = '720x1280';
-  assert.equal((await m.call('device_info', {})).scale, 1);
-  assert.equal((await m.call('ui_tree', {})).scale, 1);
+  assert.equal((await m.call('device_info', {})).scale, 1.3333);
+  assert.equal((await m.call('ui_tree', { all: true })).scale, 1.3333);
   assert.deepEqual(parseDevices('emulator-5554 device product:a transport_id:7\n'), [{ serial: 'emulator-5554', state: 'device', transport: '7' }]);
   // ADB_SERIAL: no transport id; the screenshot size exposes the stale cache
   let wm = '1280x2856';
@@ -367,4 +377,302 @@ test('a different emulator behind the same serial gets a fresh screen size (tran
   wm = '1080x2400';   // fake screencap is 1080x2400
   await n.call('screenshot', {});
   assert.deepEqual((await n.call('device_info', {})).screen, { width: 1080, height: 2400 });
+});
+
+const SETTINGS = fs.readFileSync(fileURLToPath(new URL('./settings-screen.xml', import.meta.url)), 'utf8');
+
+test('snapshot: actionable visible elements only, labels from inner texts, viewport clip, duplicate hints, texts line', () => {
+  const sn = buildSnapshot(SETTINGS);
+  assert.equal(sn.actionable, 22);   // rows below the screen (Roaming, Proxy) are not listed
+  const lines = sn.items.map(i => i.line);
+  assert.equal(lines[0], '@e1 button "Navigate up" [80,205]');
+  assert.ok(lines.includes('@e4 button "Wi-Fi · Connected to Home" [540,620]'));
+  assert.ok(lines.includes('@e5 switch #switch_widget (in "Wi-Fi") [960,620] checked'));   // duplicate id -> parent hint
+  assert.ok(lines.includes('@e18 button "NFC" [540,2360]'));                                // partly visible: center inside viewport
+  assert.equal(lines.some(l => /Roaming|Proxy/.test(l)), false);
+  assert.match(formatSnapshot(sn), /\ntext: "12:30" \| "Wi-Fi three bars\." \| "Battery 87 percent\." \| "Network & internet"$/);
+  const dup = buildSnapshot('<hierarchy><node class="android.widget.FrameLayout" bounds="[0,0][100,200]" /><node class="android.widget.Button" text="OK" clickable="true" bounds="[0,0][100,100]" /><node class="android.widget.Button" text="OK" clickable="true" bounds="[0,100][100,200]" /></hierarchy>');
+  assert.deepEqual(dup.items.map(i => i.disp), ['button "OK" (#1)', 'button "OK" (#2)']);
+  assert.equal(buildSnapshot(SETTINGS, { max: 5 }).hidden, 17);
+  assert.ok(formatSnapshot(buildSnapshot(SETTINGS, { max: 5 })).includes('+17 more'));
+});
+
+test('snapshot is much smaller than the full dump', async () => {
+  const m = mk(fake({ over: { uiautomator: SETTINGS } }));
+  const compact = m.call('ui_tree', {}).then(r => r.content[0].text.length);
+  const full = m.call('ui_tree', { all: false }).then(() => m.call('ui_tree', { all: true })).then(r => JSON.stringify(r).length);
+  assert.ok(await compact * 3 < await full);
+});
+
+test('tap_element by ref: resolves against the last snapshot; unknown and stale refs say to re-snapshot', async () => {
+  const f = fake({ over: { uiautomator: SETTINGS } }); const m = mk(f);
+  await assert.rejects(m.call('tap_element', { ref: '@e1' }), /unknown ref @e1: no snapshot taken yet.*ui_tree/);
+  await m.call('ui_tree', {});
+  const r = await m.call('tap_element', { ref: '@e2' });
+  assert.deepEqual([r.ok, r.ref, r.element], [true, '@e2', 'button "Search settings"']);
+  assert.equal(f.shells().filter(c => !c.startsWith('screencap')).pop(), 'input tap 980 205');
+  await m.call('tap_element', { ref: 'e5', long: true });
+  assert.equal(f.shells().pop(), 'input swipe 960 620 960 620 800');
+  await assert.rejects(m.call('tap_element', { ref: '@e99' }), /unknown ref @e99: the last snapshot has @e1\.\.@e22.*re-snapshot/i);
+  await assert.rejects(m.call('tap_element', { ref: 'banana' }), /invalid ref/);
+  // an action ran, screen unchanged -> the ref is re-verified and still works; screen changed -> stale error
+  const g = fake({ over: { uiautomator: SETTINGS } }); const n = mk(g);
+  await n.call('ui_tree', {}); await n.call('key', { key: 'back' });
+  await n.call('tap_element', { ref: '@e1' });
+  assert.equal(g.shells().pop(), 'input tap 80 205');
+  let xml = SETTINGS;
+  const h = fake({ over: { adb: a => a[3] === 'uiautomator' ? xml : undefined } }); const k = mk(h);
+  await k.call('ui_tree', {}); await k.call('key', { key: 'home' });
+  xml = XML;
+  await assert.rejects(k.call('tap_element', { ref: '@e1' }), /stale ref @e1 \(button "Navigate up"\).*re-snapshot with ui_tree/i);
+  await k.call('ui_tree', {});   // fresh snapshot of the new screen: refs follow it
+  await k.call('tap_element', { ref: '@e1' });
+});
+
+test('observe auto: ui list only for a normal screen; near-empty tree also attaches a screenshot and says why; env override', async () => {
+  const sparse = '<hierarchy><node class="android.view.View" bounds="[0,0][1080,2400]" /></hierarchy>';
+  const normal = await mk(fake({ over: { uiautomator: SETTINGS } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.deepEqual(normal.content.map(c => c.type), ['text', 'text']);
+  const g = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.deepEqual(g.content.map(c => c.type), ['text', 'text', 'image', 'text']);   // result, list+note, screenshot, its size info
+  assert.match(g.content[1].text, /only 0 tappable element\(s\).*game\/canvas\/Flutter\/WebView/);
+  const dflt = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: undefined }).call('key', { key: 'back' });   // default is auto
+  assert.ok(dflt.content.some(c => c.type === 'image'));
+  const ui = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'ui' }).call('key', { key: 'back' });
+  assert.equal(ui.content.some(c => c.type === 'image'), false);
+  const none = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'none' }).call('key', { key: 'back' });
+  assert.deepEqual(none, { ok: true, keycode: 4 });
+  // dump unavailable (secure window): auto falls back to the screenshot alone
+  const sec = await mk(fake({ over: { uiautomator: 'ERROR: null root node', shell: { 'uiautomator dump': 'ERROR' } } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.deepEqual(sec.content.map(c => c.type), ['text', 'text', 'image', 'text']);
+  assert.match(sec.content[1].text, /UI tree unavailable/);
+  assert.equal(SPARSE_BELOW, 3);
+  // observing refreshes the ref map
+  const f = fake({ over: { uiautomator: SETTINGS } }); const m = mk(f, { CONTROL_OBSERVE: 'auto' });
+  await m.call('key', { key: 'back' });
+  await m.call('tap_element', { ref: '@e2' });
+  assert.equal(f.shells().filter(c => !c.startsWith('screencap')).pop(), 'input tap 980 205');
+});
+
+test('observe auto: scroll-only container still counts as near-empty (screenshot attached)', async () => {
+  const xml = '<hierarchy><node class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" /></hierarchy>';
+  const r = await mk(fake({ over: { uiautomator: xml } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.ok(r.content.some(c => c.type === 'image'), 'screenshot attached');
+  assert.match(r.content.map(c => c.text || '').join('\n'), /only 0 tappable/);
+});
+
+// ------------------------------------------------------------------ speed: timing, adaptive settle, wait_for polling
+
+test('CONTROL_TIMING=1 logs a per-call breakdown; off by default', async () => {
+  const lines = [], clock = { t: 0 };
+  const on = createControlMcp({ exec: fake().exec, env: { CONTROL_AUTO_WAKE: '0', CONTROL_TIMING: '1' }, now: () => clock.t, sleep: async () => {}, log: l => lines.push(l) });
+  await on.call('ui_tree', {});
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\[timing\] ui_tree total=\d+ms \| .*adb:uiautomator-dump=\d+ms/);
+  assert.match(lines[0], /parse=\d+ms/);
+  const off = createControlMcp({ exec: fake().exec, env: { CONTROL_AUTO_WAKE: '0' }, now: () => clock.t, sleep: async () => {}, log: l => lines.push(l) });
+  await off.call('ui_tree', {});
+  assert.equal(lines.length, 1);
+  // a batch is one record (steps fold into it)
+  await on.call('batch', { steps: [{ tool: 'key', args: { key: 'back' } }, { tool: 'tap', args: { x: 1, y: 1 } }], observe: 'none' });
+  assert.equal(lines.length, 2); assert.match(lines[1], /^\[timing\] batch /);
+});
+
+test('adaptive settle: returns as soon as two frames in a row are identical, never exceeds settleMs', async () => {
+  const hashes = ['a'.repeat(32), 'b'.repeat(32), 'b'.repeat(32), 'c'.repeat(32)];
+  const f = fake({ over: { shell: { 'screencap | md5sum': () => `${hashes.shift()}  -\n` } } }), clock = { t: 0 };
+  const m = mk(f, { CONTROL_OBSERVE: 'ui' }, clock);
+  await m.call('tap', { x: 1, y: 1, settleMs: 5000 });
+  assert.equal(f.shells().filter(c => c.startsWith('screencap')).length, 3);   // a, b, b -> stable
+  assert.ok(clock.t < 400, `waited ${clock.t}ms`);
+  // never stable: gives up at the cap
+  let n = 0;
+  const g = fake({ over: { shell: { 'screencap | md5sum': () => `${(n++).toString(16).padStart(32, '0')}  -\n` } } }), c2 = { t: 0 };
+  await mk(g, { CONTROL_OBSERVE: 'ui' }, c2).call('tap', { x: 1, y: 1, settleMs: 600 });
+  assert.ok(c2.t >= 600 && c2.t < 900, `waited ${c2.t}ms`);
+  // frames unreadable (secure window): the old fixed wait
+  const h = fake(), c3 = { t: 0 };
+  await mk(h, { CONTROL_OBSERVE: 'ui' }, c3).call('tap', { x: 1, y: 1, settleMs: 500 });
+  assert.equal(c3.t, 500);
+});
+
+test('wait_for: first look dumps at once, later polls skip the uiautomator dump while the frame is unchanged', async () => {
+  let dumps = 0, frame = 0;
+  const f = fake({ over: { adb: a => { if (a[2] === 'exec-out' && a[3] === 'uiautomator') { dumps++; return dumps >= 3 ? XML : XML.replace('Send', 'Nope'); } }, shell: { 'screencap | md5sum': () => `${(frame >= 8 ? 2 : 1).toString().repeat(32)}  -\n` } } });
+  const clock = { t: 0 };
+  const m = mk(f, {}, { get t() { return clock.t; }, set t(v) { clock.t = v; frame++; } });
+  const r = await m.call('wait_for', { text: 'Send', timeoutMs: 60000 });
+  assert.equal(r.ok, true);
+  assert.equal(dumps, 3);                                  // first look, then once when the frame changed... and again after
+  assert.ok(f.shells().filter(c => c.startsWith('screencap')).length >= 3);
+});
+
+// ------------------------------------------------------------------ websocket framing
+
+test('websocket frames: masked/unmasked, 16/64-bit lengths, fragments, split chunks', () => {
+  for (const mask of [true, false]) for (const n of [0, 5, 125, 126, 300, 65535, 65536, 70000]) {
+    const payload = Buffer.alloc(n, 'x'), parse = wsParser();
+    const frame = wsFrame(payload, { mask });
+    assert.equal((frame[1] & 0x80) !== 0, mask);
+    let got = [];
+    for (let i = 0; i < frame.length; i += 7) got.push(...parse(frame.subarray(i, i + 7)));   // dribble
+    assert.equal(got.length, 1); assert.deepEqual(got[0].payload, payload); assert.equal(got[0].opcode, 1);
+  }
+  const parse = wsParser();   // fragmented text message with a ping in the middle
+  const a = Buffer.from(wsFrame('hel', { mask: false })); a[0] = 0x01;
+  const b = Buffer.from(wsFrame('lo', { mask: false })); b[0] = 0x80;
+  const ping = wsFrame('p', { mask: false, opcode: 9 });
+  const out = parse(Buffer.concat([a, ping, b]));
+  assert.deepEqual(out.map(o => [o.opcode, o.payload.toString()]), [[9, 'p'], [1, 'hello']]);
+});
+
+test('parseDevtoolsSockets / formatWebSnapshot', () => {
+  const unix = `Num RefCount Protocol Flags Type St Inode Path
+0000: 00000002 00000000 00010000 0001 01 1 @webview_devtools_remote_58084
+0000: 00000002 00000000 00010000 0001 01 2 @chrome_devtools_remote
+0000: 00000002 00000000 00010000 0001 01 3 @webview_devtools_remote_58084
+0000: 00000002 00000000 00010000 0001 01 4 /dev/socket/zygote`;
+  assert.deepEqual(parseDevtoolsSockets(unix), ['webview_devtools_remote_58084', 'chrome_devtools_remote']);
+  const t = formatWebSnapshot({ url: 'https://x.y/', title: 'X', vw: 400, vh: 800, scrollY: 0, offscreen: 2, hidden: 0, texts: ['Hi'],
+    items: [{ role: 'button', label: 'OK', value: '', flags: [], x: 10, y: 20 }, { role: 'button', label: 'OK', value: '', flags: ['disabled'], x: 10, y: 60 }, { role: 'input', label: 'Name', value: 'Tom', flags: ['focused'], x: 5, y: 9 }] });
+  assert.equal(t, `web https://x.y/ "X" viewport 400x800 (CSS px) scrollY 0 | 3 interactive (web_click ref:"@wN")
+@w1 button "OK" (#1) [10,20]
+@w2 button "OK" (#2) [10,60] disabled
+@w3 input "Name" = "Tom" [5,9] focused
+(+2 interactive elements off-screen: web_eval "window.scrollBy(0, innerHeight*0.8)" or use selector/text)
+text: "Hi"`);
+});
+
+// ------------------------------------------------------------------ CDP end to end against an in-process fake DevTools server
+
+/** serves /json/list and a websocket endpoint; `handler(method, params)` answers CDP commands; `log` records them */
+async function devtoolsServer(handler) {
+  const log = [];
+  const server = http.createServer((req, res) => {
+    if (req.url === '/json/list') {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify([{ type: 'page', title: 'T1', url: 'https://example.test/', webSocketDebuggerUrl: `ws://localhost:1/devtools/page/AAA` },
+        { type: 'service_worker', title: 'sw', url: 'x', webSocketDebuggerUrl: 'ws://localhost:1/devtools/page/SW' }]));
+    } else { res.statusCode = 404; res.end(); }
+  });
+  server.on('upgrade', (req, sock) => {
+    const key = req.headers['sec-websocket-key'];
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')}\r\n\r\n`);
+    const parse = wsParser();
+    sock.on('data', c => { for (const f of parse(c)) {
+      if (f.opcode === 8) return sock.end();
+      const m = JSON.parse(f.payload.toString()); log.push(m);
+      let result; try { result = handler(m.method, m.params); } catch (e) { sock.write(wsFrame(JSON.stringify({ id: m.id, error: { message: e.message } }), { mask: false })); continue; }
+      sock.write(wsFrame(JSON.stringify({ id: m.id, result: result ?? {} }), { mask: false }));
+    } });
+    sock.on('error', () => {});
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  return { port: server.address().port, log, close: () => { server.closeAllConnections(); server.close(); } };
+}
+const SNAP = { url: 'https://example.test/', title: 'T1', vw: 400, vh: 800, scrollY: 0, offscreen: 0, hidden: 0, texts: ['Hello'],
+  items: [{ role: 'button', label: 'Go', value: '', flags: [], x: 24, y: 78 }, { role: 'input', label: 'Name', value: '', flags: [], x: 136, y: 78 }] };
+
+for (const ws of ['builtin', 'minimal']) test(`web_* tools over CDP (${ws} websocket client)`, async () => {
+  const dt = await devtoolsServer((method, p) => {
+    if (method === 'Runtime.evaluate') {
+      const e = p.expression;
+      if (e.includes('window.__droidRefs = ')) return { result: { value: JSON.stringify(SNAP) } };
+      if (e.includes('el.focus()')) return { result: { value: 'input:text' } };
+      if (e.includes('scrollIntoView') && e.includes('getBoundingClientRect')) return { result: { value: JSON.stringify({ x: 24, y: 78, w: 40, h: 20, tag: 'button', label: 'Go' }) } };
+      if (e.includes('boom')) return { exceptionDetails: { text: 'Uncaught', exception: { description: 'Error: boom\n    at <anonymous>:1:7' } } };
+      if (e.includes('el.focus()')) return { result: { value: 'input:text' } };
+      return { result: { value: [1, 'two'] } };
+    }
+    return {};
+  });
+  try {
+    const f = fake({ over: { shell: {
+      'cat /proc/net/unix': '0: 00000002 00000000 00010000 0001 01 1 @webview_devtools_remote_321\n0: 2 0 1 1 01 2 @chrome_devtools_remote\n--droid-web--\n321 com.example.app \n',
+      'dumpsys window': '  mCurrentFocus=Window{abc u0 com.example.app/com.example.app.Main}\n' },
+      adb: a => { if (a[2] === 'forward') return a[3] === '--list' ? '' : `${dt.port}\n`; } } });
+    const m = mk(f, { CONTROL_WS: ws });
+    const snap = await m.call('web_snapshot', {});
+    assert.match(snap.content[0].text, /^web https:\/\/example.test\/ "T1" viewport 400x800/);
+    assert.match(snap.content[0].text, /@w1 button "Go" \[24,78\]\n@w2 input "Name" \[136,78\]/);
+    // foreground app's socket was chosen (not chrome), through adb forward
+    assert.ok(f.calls.some(c => c.args.join(' ') === `-s localhost:40123 forward tcp:0 localabstract:webview_devtools_remote_321`));
+    // click: real mouse events at the element centre, then a fresh snapshot
+    const click = await m.call('web_click', { ref: '@w1', settleMs: 0 });
+    assert.deepEqual(JSON.parse(click.content[0].text), { ok: true, clicked: 'button "Go"', at: [24, 78] });
+    assert.match(click.content[1].text, /@w1 button "Go"/);
+    assert.deepEqual(dt.log.filter(x => x.method === 'Input.dispatchMouseEvent').map(x => x.params.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+    // type: focus + insertText (unicode) + Enter, no snapshot with observe:none
+    const ty = await m.call('web_type', { label: 'Name', text: '안녕', clear: true, enter: true, observe: 'none' });
+    assert.deepEqual(JSON.parse(ty.content[0].text), { ok: true, typed: 2, into: 'input:text' }); assert.equal(ty.content.length, 1);
+    assert.deepEqual(dt.log.find(x => x.method === 'Input.insertText').params, { text: '안녕' });
+    assert.deepEqual(dt.log.filter(x => x.method === 'Input.dispatchKeyEvent').map(x => x.params.type), ['keyDown', 'keyUp']);
+    const focusExpr = dt.log.filter(x => x.method === 'Runtime.evaluate').map(x => x.params.expression).find(e => e.includes('el.focus()'));
+    assert.match(focusExpr, /"text":"Name"/); assert.match(focusExpr, /execCommand\('delete'\)/);
+    // eval: values by value; page exceptions are errors
+    assert.equal((await m.call('web_eval', { expression: '[1,"two"]' })).content[0].text, '[1,"two"]');
+    await assert.rejects(m.call('web_eval', { expression: 'throw new Error("boom")' }), /^Error: boom$/);
+    await assert.rejects(m.call('web_click', {}), /give ref, selector or text/);
+    // usable inside a batch next to wait_for-style steps
+    const b = await m.call('batch', { observe: 'none', steps: [{ tool: 'web_eval', args: { expression: '1+1' } }, { tool: 'web_click', args: { selector: '#b', observe: 'none' } }] });
+    assert.equal(JSON.parse(b.content[0].text).completed, 2);
+  } finally { dt.close(); }
+});
+
+test('web tools: explicit package/socket, no sockets, unknown package', async () => {
+  const none = fake({ over: { shell: { 'cat /proc/net/unix': 'Num\n--droid-web--\n' } } });
+  await assert.rejects(mk(none).call('web_snapshot', {}), /no WebView\/Chrome devtools socket.*setWebContentsDebuggingEnabled/);
+  const one = fake({ over: { shell: { 'cat /proc/net/unix': '0: 1 @chrome_devtools_remote\n--droid-web--\n' } } });
+  await assert.rejects(mk(one).call('web_snapshot', { package: 'com.nope' }), /no devtools socket for package com.nope; available: \["chrome_devtools_remote \(com.android.chrome\)"\]/);
+  assert.ok(['web_snapshot', 'web_click', 'web_type', 'web_eval'].every(n => TOOLS[n] && !TOOLS[n].action));
+  assert.match(TOOLS.batch.description, /wait_for/); assert.match(TOOLS.batch.description, /ONCE at the end/);
+});
+
+// ---- optional AccessibilityService fast path (fake endpoint; no device) ----
+const A11Y_XML = XML.replace(/\nUI hierchary.*$/, '').replace('Tom &amp; Jerry', 'Via A11y');
+const mkA = (f, a11yFetch, env = {}, clock = { t: 0 }) => createControlMcp({ exec: f.exec, a11yFetch, env: { CONTROL_AUTO_WAKE: '0', CONTROL_OBSERVE: 'none', ...env },
+  now: () => clock.t, sleep: async d => { clock.t += d; } });
+const dumps = f => f.calls.filter(c => c.args.includes('uiautomator') || String(c.args[3] || '').startsWith('uiautomator'));
+
+test('a11y: off by default; on with token; output identical to uiautomator path', async () => {
+  let hits = 0;
+  const fetcher = async () => { hits++; return XML.replace(/\nUI hierchary.*$/, ''); };
+  const f0 = fake(); const base = await mkA(f0, fetcher).call('ui_tree', { all: true });
+  assert.equal(hits, 0); assert.equal(dumps(f0).length, 1);
+  const f1 = fake(); const fast = await mkA(f1, fetcher, { CONTROL_A11Y_TOKEN: 't' }).call('ui_tree', { all: true });
+  assert.equal(hits, 1); assert.equal(dumps(f1).length, 0);
+  assert.deepEqual(fast, base);
+  const f2 = fake(); await mkA(f2, fetcher, { CONTROL_A11Y_TOKEN: 't', CONTROL_A11Y: '0' }).call('ui_tree', {});
+  assert.equal(hits, 1);
+});
+
+test('a11y: sends token + port; adb-forwards once when direct fetch fails', async () => {
+  const seen = []; let up = false;
+  const f = fake({ over: { adb: a => { if (a.includes('forward')) { up = true; return ''; } } } });
+  const m = mkA(f, async o => { seen.push(o); if (!up) throw new Error('refused'); return A11Y_XML; }, { CONTROL_A11Y: '1', CONTROL_A11Y_TOKEN: 'sek', CONTROL_A11Y_PORT: '9001' });
+  const r = await m.call('ui_tree', { all: true });
+  assert.ok(JSON.stringify(r).includes('Via A11y'));
+  assert.equal(seen[0].token, 'sek'); assert.equal(seen[0].port, 9001);
+  assert.equal(f.calls.filter(c => c.args.includes('forward')).length, 1);
+  assert.deepEqual(f.calls.find(c => c.args.includes('forward')).args.slice(-2), ['tcp:9001', 'tcp:8767']);
+  await m.call('ui_tree', {}); assert.equal(f.calls.filter(c => c.args.includes('forward')).length, 1);
+  assert.equal(dumps(f).length, 0);
+});
+
+test('a11y: any failure (refused, garbage body) falls back to uiautomator; backoff 30 s', async () => {
+  for (const bad of [async () => { throw new Error('refused'); }, async () => 'not xml', async () => 42]) {
+    let hits = 0; const clock = { t: 0 };
+    const f = fake();
+    const m = mkA(f, async o => { hits++; return bad(o); }, { CONTROL_A11Y: '1', CONTROL_A11Y_TOKEN: 't' }, clock);
+    const r = await m.call('ui_tree', { all: true });
+    assert.equal(r.count, 3); assert.equal(dumps(f).length, 1);
+    const before = hits; await m.call('ui_tree', {}); assert.equal(hits, before);   // backed off
+    clock.t += 31000; await m.call('ui_tree', {}); assert.ok(hits > before);        // retried after backoff
+  }
+});
+
+test('a11y: CONTROL_A11Y=1 without a token never calls the endpoint', async () => {
+  let hits = 0; const f = fake();
+  await mkA(f, async () => { hits++; return A11Y_XML; }, { CONTROL_A11Y: '1' }).call('ui_tree', {});
+  assert.equal(hits, 0); assert.equal(dumps(f).length, 1);
 });
