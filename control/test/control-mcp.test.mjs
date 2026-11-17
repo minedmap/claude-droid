@@ -424,3 +424,52 @@ test('observe auto: scroll-only container still counts as near-empty (screenshot
   assert.ok(r.content.some(c => c.type === 'image'), 'screenshot attached');
   assert.match(r.content.map(c => c.text || '').join('\n'), /only 0 tappable/);
 });
+
+// ---- optional AccessibilityService fast path (fake endpoint; no device) ----
+const A11Y_XML = XML.replace(/\nUI hierchary.*$/, '').replace('Tom &amp; Jerry', 'Via A11y');
+const mkA = (f, a11yFetch, env = {}, clock = { t: 0 }) => createControlMcp({ exec: f.exec, a11yFetch, env: { CONTROL_AUTO_WAKE: '0', CONTROL_OBSERVE: 'none', ...env },
+  now: () => clock.t, sleep: async d => { clock.t += d; } });
+const dumps = f => f.calls.filter(c => c.args.includes('uiautomator') || String(c.args[3] || '').startsWith('uiautomator'));
+
+test('a11y: off by default; on with token; output identical to uiautomator path', async () => {
+  let hits = 0;
+  const fetcher = async () => { hits++; return XML.replace(/\nUI hierchary.*$/, ''); };
+  const f0 = fake(); const base = await mkA(f0, fetcher).call('ui_tree', { all: true });
+  assert.equal(hits, 0); assert.equal(dumps(f0).length, 1);
+  const f1 = fake(); const fast = await mkA(f1, fetcher, { CONTROL_A11Y_TOKEN: 't' }).call('ui_tree', { all: true });
+  assert.equal(hits, 1); assert.equal(dumps(f1).length, 0);
+  assert.deepEqual(fast, base);
+  const f2 = fake(); await mkA(f2, fetcher, { CONTROL_A11Y_TOKEN: 't', CONTROL_A11Y: '0' }).call('ui_tree', {});
+  assert.equal(hits, 1);
+});
+
+test('a11y: sends token + port; adb-forwards once when direct fetch fails', async () => {
+  const seen = []; let up = false;
+  const f = fake({ over: { adb: a => { if (a.includes('forward')) { up = true; return ''; } } } });
+  const m = mkA(f, async o => { seen.push(o); if (!up) throw new Error('refused'); return A11Y_XML; }, { CONTROL_A11Y: '1', CONTROL_A11Y_TOKEN: 'sek', CONTROL_A11Y_PORT: '9001' });
+  const r = await m.call('ui_tree', { all: true });
+  assert.ok(JSON.stringify(r).includes('Via A11y'));
+  assert.equal(seen[0].token, 'sek'); assert.equal(seen[0].port, 9001);
+  assert.equal(f.calls.filter(c => c.args.includes('forward')).length, 1);
+  assert.deepEqual(f.calls.find(c => c.args.includes('forward')).args.slice(-2), ['tcp:9001', 'tcp:8767']);
+  await m.call('ui_tree', {}); assert.equal(f.calls.filter(c => c.args.includes('forward')).length, 1);
+  assert.equal(dumps(f).length, 0);
+});
+
+test('a11y: any failure (refused, garbage body) falls back to uiautomator; backoff 30 s', async () => {
+  for (const bad of [async () => { throw new Error('refused'); }, async () => 'not xml', async () => 42]) {
+    let hits = 0; const clock = { t: 0 };
+    const f = fake();
+    const m = mkA(f, async o => { hits++; return bad(o); }, { CONTROL_A11Y: '1', CONTROL_A11Y_TOKEN: 't' }, clock);
+    const r = await m.call('ui_tree', { all: true });
+    assert.equal(r.count, 3); assert.equal(dumps(f).length, 1);
+    const before = hits; await m.call('ui_tree', {}); assert.equal(hits, before);   // backed off
+    clock.t += 31000; await m.call('ui_tree', {}); assert.ok(hits > before);        // retried after backoff
+  }
+});
+
+test('a11y: CONTROL_A11Y=1 without a token never calls the endpoint', async () => {
+  let hits = 0; const f = fake();
+  await mkA(f, async () => { hits++; return A11Y_XML; }, { CONTROL_A11Y: '1' }).call('ui_tree', {});
+  assert.equal(hits, 0); assert.equal(dumps(f).length, 1);
+});

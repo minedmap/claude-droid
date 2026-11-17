@@ -24,6 +24,13 @@
         android:foregroundServiceType="dataSync"/>
     <service android:name=".usb.UsbBridgeService" android:exported="false"
         android:foregroundServiceType="dataSync"/>
+    <!-- Optional fast UI tree for control-mcp; inert until the user enables it in Settings > Accessibility -->
+    <service android:name=".a11y.A11yService" android:exported="false"
+        android:label="Claude Droid UI tree"
+        android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+      <meta-data android:name="android.accessibilityservice" android:resource="@xml/a11y_service_config"/>
+    </service>
     <provider android:name="androidx.core.content.FileProvider"
         android:authorities="${applicationId}.fileprovider"
         android:exported="false" android:grantUriPermissions="true">
