@@ -247,7 +247,7 @@ export function buildSnapshot(xml, { scale = 1, max = MAX_LIST } = {}) {
     const v = clip(own(t.a), 50);
     if (!texts.includes(v)) texts.push(v);
   }
-  return { screen: [vx2 - vx1, vy2 - vy1], actionable: cands.length, items, hidden: cands.length - shown.length, texts: texts.slice(0, 25), moreTexts: Math.max(0, texts.length - 25) };
+  return { screen: [vx2 - vx1, vy2 - vy1], actionable: cands.length, tappable: cands.filter(c => c.role !== 'scroll').length, items, hidden: cands.length - shown.length, texts: texts.slice(0, 25), moreTexts: Math.max(0, texts.length - 25) };
 }
 
 /** Text form of a snapshot: header, one line per element, then the visible plain texts. */
@@ -422,8 +422,8 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     const { xml, scale: s } = given ?? await uiXml();
     const built = buildSnapshot(xml, { scale: s });
     if (store) snap = { items: new Map(built.items.map(i => [i.ref, i])), dirty: false };
-    return { ...built, scale: s, xml, sparse: built.actionable < SPARSE_BELOW,
-      text: formatSnapshot(built, s) + (built.actionable < SPARSE_BELOW ? `\nnote: only ${built.actionable} actionable element(s) in the UI tree (game/canvas/Flutter/WebView/secure window?): use screenshot and tap x,y` : '') };
+    return { ...built, scale: s, xml, sparse: built.tappable < SPARSE_BELOW,
+      text: formatSnapshot(built, s) + (built.tappable < SPARSE_BELOW ? `\nnote: only ${built.tappable} tappable element(s) in the UI tree (game/canvas/Flutter/WebView/secure window?): use screenshot and tap x,y` : '') };
   }
   /** @eN -> element of the last snapshot; if an action ran since, it must still be on screen (matched by role/label/hint) */
   async function resolveRef(ref) {

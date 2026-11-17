@@ -399,7 +399,7 @@ test('observe auto: ui list only for a normal screen; near-empty tree also attac
   assert.deepEqual(normal.content.map(c => c.type), ['text', 'text']);
   const g = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
   assert.deepEqual(g.content.map(c => c.type), ['text', 'text', 'image', 'text']);   // result, list+note, screenshot, its size info
-  assert.match(g.content[1].text, /only 0 actionable element\(s\).*game\/canvas\/Flutter\/WebView/);
+  assert.match(g.content[1].text, /only 0 tappable element\(s\).*game\/canvas\/Flutter\/WebView/);
   const dflt = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: undefined }).call('key', { key: 'back' });   // default is auto
   assert.ok(dflt.content.some(c => c.type === 'image'));
   const ui = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'ui' }).call('key', { key: 'back' });
@@ -416,4 +416,11 @@ test('observe auto: ui list only for a normal screen; near-empty tree also attac
   await m.call('key', { key: 'back' });
   await m.call('tap_element', { ref: '@e2' });
   assert.equal(f.shells().pop(), 'input tap 980 205');
+});
+
+test('observe auto: scroll-only container still counts as near-empty (screenshot attached)', async () => {
+  const xml = '<hierarchy><node class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" /></hierarchy>';
+  const r = await mk(fake({ over: { uiautomator: xml } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.ok(r.content.some(c => c.type === 'image'), 'screenshot attached');
+  assert.match(r.content.map(c => c.text || '').join('\n'), /only 0 tappable/);
 });
