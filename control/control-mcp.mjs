@@ -117,6 +117,20 @@ function defaultExec(bin, args, { timeout = 15000, input } = {}) {
   });
 }
 
+/** GET http://host:port/path with a token header; resolves the body text, rejects on any non-200/timeout/error. */
+export function defaultA11yFetch({ port, token, path = '/a11y/tree', timeout = 2500 }) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path, headers: { 'X-Token': token }, timeout }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => res.statusCode === 200 ? resolve(Buffer.concat(chunks).toString('utf8')) : reject(new Error('a11y http ' + res.statusCode)));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error('a11y timeout')));
+    req.on('error', reject);
+  });
+}
+
 /** `adb devices` output -> [{serial, state}] */
 export function parseDevices(out) {
   return String(out).split('\n').map(l => l.trim())
@@ -512,7 +526,7 @@ const WAKE_CMD = `dumpsys power | grep -q 'mWakefulness=Awake' || { input keyeve
 const GONE = /device offline|device '[^']*' not found|device not found|no devices\/emulators found|error: closed|connection reset/i;
 const describeQuery = a => [a.text != null && `text "${a.text}"`, a.id != null && `id "${a.id}"`].filter(Boolean).join(' + ');
 
-export function createControlMcp({ exec = defaultExec, env = process.env, sleep = t => new Promise(r => setTimeout(r, t)), now = Date.now, log = m => process.stderr.write(m + '\n') } = {}) {
+export function createControlMcp({ exec = defaultExec, env = process.env, sleep = t => new Promise(r => setTimeout(r, t)), now = Date.now, log = m => process.stderr.write(m + '\n'), a11yFetch = defaultA11yFetch } = {}) {
   const adbBin = env.ADB_BIN || 'adb';
   const maxSide = env.CONTROL_MAX_SIDE === undefined || env.CONTROL_MAX_SIDE === '' ? 960 : Number(env.CONTROL_MAX_SIDE) || 0;
   const jpegQuality = Math.min(100, Math.max(1, Number(env.CONTROL_JPEG_QUALITY) || 60));
@@ -538,6 +552,12 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   const defaultSettle = Number.isFinite(settleEnv) && settleEnv >= 0 ? settleEnv : 700;
   const autoWake = env.CONTROL_AUTO_WAKE !== '0';
   const autoConnectOn = env.CONTROL_AUTO_CONNECT !== '0';
+  // Optional fast UI tree from the Claude Droid AccessibilityService (127.0.0.1:8767, same token as the bridge).
+  // CONTROL_A11Y=0 off, =1 on, unset = on only when CONTROL_A11Y_TOKEN is set. Any failure -> uiautomator dump.
+  const a11yToken = env.CONTROL_A11Y_TOKEN || '';
+  const a11yOn = env.CONTROL_A11Y === '1' || (env.CONTROL_A11Y !== '0' && !!a11yToken);
+  const a11yPort = Number(env.CONTROL_A11Y_PORT) || 8767;
+  let a11yDownUntil = -Infinity, a11yForwarded = false;
   let resizer;                    // undefined = not probed, null = none, else binary name
   const sizes = new Map();        // serial -> { width, height }
   let awakeAt = -Infinity, connectAt = -Infinity, adbKeyboard;
@@ -645,7 +665,21 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   }
   const ms = (v, def, max) => { const n = Number(v ?? def); if (!Number.isFinite(n) || n < 0) throw new Error(`invalid duration: ${v}`); return Math.min(Math.round(n), max); };
 
+  async function a11yXml() {
+    if (!a11yOn || !a11yToken || now() < a11yDownUntil) return '';
+    const get = () => a11yFetch({ port: a11yPort, token: a11yToken });
+    const ok = x => typeof x === 'string' && x.includes('<hierarchy') ? x : '';
+    try { return ok(await get()) || (() => { throw new Error('bad body'); })(); } catch {}
+    if (!a11yForwarded) {   // not directly reachable (PC side): forward the device port once, retry
+      try { await adb(['forward', `tcp:${a11yPort}`, 'tcp:8767'], { timeout: 8000 }); a11yForwarded = true; return ok(await get()); } catch {}
+    }
+    a11yDownUntil = now() + 30000;   // do not pay the timeout on every call
+    return '';
+  }
+
   async function uiXml() {
+    const fast = await a11yXml();
+    if (fast) return { xml: fast, scale: await scale() };
     let xml = '';
     try { xml = String((await adb(['exec-out', 'uiautomator', 'dump', '/dev/tty'], { timeout: 30000 })).stdout); } catch {}
     if (!xml.includes('<hierarchy')) {
