@@ -1,8 +1,9 @@
 import { test } from 'node:test';
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createControlMcp, TOOLS, INSTRUCTIONS, parseDevices, parseMdns, parseUiTree, findElements, pngSize } from '../control-mcp.mjs';
+import { createControlMcp, TOOLS, INSTRUCTIONS, parseDevices, parseMdns, parseUiTree, buildSnapshot, formatSnapshot, findElements, pngSize, SPARSE_BELOW } from '../control-mcp.mjs';
 
 const script = fileURLToPath(new URL('../control-mcp.mjs', import.meta.url));
 const fakeAdb = fileURLToPath(new URL('./fake-adb.sh', import.meta.url));
@@ -46,7 +47,7 @@ function fake({ devices = 'List of devices attached\nlocalhost:40123\tdevice\n\n
   };
   return { exec, calls, shells: () => calls.filter(c => c.args[2] === 'shell').map(c => c.args[3]) };
 }
-const mk = (f, env = {}, clock = { t: 0 }) => createControlMcp({ exec: f.exec, env: { CONTROL_AUTO_WAKE: '0', ...env },
+const mk = (f, env = {}, clock = { t: 0 }) => createControlMcp({ exec: f.exec, env: { CONTROL_AUTO_WAKE: '0', CONTROL_OBSERVE: 'none', ...env },
   now: () => clock.t, sleep: async d => { clock.t += d; (clock.sleeps ||= []).push(d); } });
 const text = r => JSON.parse(r.result.content.find(c => c.type === 'text').text);
 
@@ -95,8 +96,8 @@ test('with ImageMagick: screenshot is downsized and coordinates are scaled back'
   await m.call('long_press', { x: 16, y: 16, durationMs: 500 });
   assert.deepEqual(f.shells().filter(s => s.startsWith('input')),
     ['input tap 540 1200', 'input swipe 188 1875 188 375 300', 'input swipe 30 30 30 30 500']);
-  const t = await m.call('ui_tree', {});
-  assert.deepEqual(t.nodes[0].bounds, [53, 107, 267, 160]);
+  const t = await m.call('ui_tree', { all: true });
+  assert.deepEqual(t.nodes[1].bounds, [53, 107, 267, 160]);
 });
 
 test('screenshot without ImageMagick returns the raw PNG at scale 1; CONTROL_MAX_SIDE=0 never probes', async () => {
@@ -126,13 +127,14 @@ test('key: names, numbers, KEYCODE_ names, rejects junk', async () => {
 
 test('ui_tree: filters, decodes entities, falls back to a file dump', async () => {
   const m = mk(fake());
-  const t = await m.call('ui_tree', {});
-  assert.equal(t.count, 2);
-  assert.deepEqual(t.nodes[0], { bounds: [100, 200, 500, 300], center: [300, 250], text: 'Tom & Jerry', id: 'title', class: 'TextView' });
-  assert.deepEqual(t.nodes[1], { bounds: [900, 2200, 1080, 2400], center: [990, 2300], desc: 'Send', id: 'send', class: 'ImageButton', flags: ['clickable', 'disabled'] });
+  const t = await m.call('ui_tree', { all: true }).then(async () => m.call('ui_tree', {}).then(() => parseUiTree(XML)));
+  const full = await m.call('ui_tree', { all: false }); assert.match(full.content[0].text, /^screen 1080x2400/);
+  assert.equal(t.length, 2);
+  assert.deepEqual(t[0], { bounds: [100, 200, 500, 300], center: [300, 250], text: 'Tom & Jerry', id: 'title', class: 'TextView' });
+  assert.deepEqual(t[1], { bounds: [900, 2200, 1080, 2400], center: [990, 2300], desc: 'Send', id: 'send', class: 'ImageButton', flags: ['clickable', 'disabled'] });
   assert.equal((await m.call('ui_tree', { all: true })).count, 3);
   const f = fake({ over: { uiautomator: 'Killed', shell: { 'uiautomator dump': XML } } });
-  assert.equal((await mk(f).call('ui_tree', {})).count, 2);
+  assert.equal((await mk(f).call('ui_tree', { all: true })).count, 3);
   assert.equal(parseUiTree('<node text="x" />').length, 0);   // no bounds -> skipped
 });
 
@@ -180,22 +182,28 @@ test('helpers', () => {
 });
 
 test('stdio: real process against a fake adb binary', async () => {
-  const p = spawn(process.execPath, [script], { env: { ...process.env, ADB_BIN: fakeAdb, CONTROL_MAX_SIDE: '0' }, stdio: ['pipe', 'pipe', 'inherit'] });
+  const p = spawn(process.execPath, [script], { env: { ...process.env, ADB_BIN: fakeAdb, CONTROL_MAX_SIDE: '0', CONTROL_OBSERVE: 'none', CONTROL_SETTLE_MS: '0' }, stdio: ['pipe', 'pipe', 'inherit'] });
   let out = ''; p.stdout.on('data', d => out += d);
   p.stdin.write(JSON.stringify(rpc('initialize', {}, 1)) + '\n');
   p.stdin.write('not json\n');
   p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'key', arguments: { key: 'home' } }, 2)) + '\n');
   p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'shell', arguments: { command: 'exit 3' } }, 3)) + '\n');
+  p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'ui_tree', arguments: {} }, 4)) + '\n');
+  while (!out.includes('"id":4')) await new Promise(r => setTimeout(r, 20));   // refs resolve against the previous snapshot: be sequential like a real client
+  p.stdin.write(JSON.stringify(rpc('tools/call', { name: 'tap_element', arguments: { ref: '@e2', observe: 'ui' } }, 5)) + '\n');
   p.stdin.end();
   const code = await new Promise(r => p.on('close', r));
   assert.equal(code, 0);
   const msgs = out.trim().split('\n').map(l => JSON.parse(l));
-  assert.equal(msgs.length, 4);
+  assert.equal(msgs.length, 6);
   const by = id => msgs.find(m => m.id === id);
   assert.equal(by(1).result.serverInfo.name, 'droid-control');
   assert.equal(by(null).error.code, -32700);
   assert.deepEqual(JSON.parse(by(2).result.content[0].text), { ok: true, keycode: 3 });
   assert.deepEqual(JSON.parse(by(3).result.content[0].text), { exitCode: 3, output: 'fake: exit 3\n' });
+  assert.match(by(4).result.content[0].text, /@e2 button "Search settings" \[980,205\]/);
+  assert.equal(JSON.parse(by(5).result.content[0].text).ref, '@e2');
+  assert.match(by(5).result.content[1].text, /^screen 1080x2400/);
 });
 
 test('tap_element: exact before substring, clickable preferred, index, id, long, no match lists labels', async () => {
@@ -221,11 +229,11 @@ test('observe: action returns the new screen after settling; default from CONTRO
   const f = fake(), clock = { t: 0 }; const m = mk(f, {}, clock);
   const r = await m.handle(rpc('tools/call', { name: 'tap', arguments: { x: 1, y: 2, observe: 'ui', settleMs: 250 } }));
   assert.deepEqual(JSON.parse(r.result.content[0].text), { ok: true });
-  assert.equal(JSON.parse(r.result.content[1].text).screen.count, 2);
+  assert.match(r.result.content[1].text, /^screen 1080x2400 .*\n@e1 button "Send" \[990,2300\] disabled/);
   assert.deepEqual(clock.sleeps, [250]);
   const s = await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('key', { key: 'back' });
   assert.equal(s.content[1].type, 'image');
-  assert.equal((await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('ui_tree', {})).count, 2);   // non-actions never observe
+  assert.equal((await mk(fake(), { CONTROL_OBSERVE: 'screenshot' }).call('ui_tree', {})).content.length, 1);   // non-actions never observe
   const f2 = fake();
   await assert.rejects(mk(f2).call('tap', { x: 1, y: 1, observe: 'video' }), /invalid observe/);
   assert.deepEqual(f2.shells(), []);
@@ -296,7 +304,7 @@ test('batch: runs steps in order, sleep steps, stops at the first failure unless
   assert.equal(c.isError, true);   // errors are not hidden by the final observe
   assert.deepEqual(g.shells(), ['input keyevent 4']);
   const ok = await mk(fake()).call('batch', { observe: 'ui', steps: [{ tool: 'key', args: { key: 'back' } }] });
-  assert.equal(JSON.parse(ok.content.at(-1).text).screen.count, 2);
+  assert.match(ok.content.at(-1).text, /^screen 1080x2400/);
   await assert.rejects(m.call('batch', { steps: [] }), /non-empty/);
 });
 
@@ -333,4 +341,79 @@ test('auto-connect: no device -> mDNS discovery + adb connect, then retries; dro
   assert.deepEqual(g.calls.map(c => c.args.join(' ')),
     ['-s localhost:5555 shell input keyevent 3', 'mdns services', 'reconnect offline', 'connect localhost:5555', '-s localhost:5555 shell input keyevent 3']);
   assert.deepEqual(parseMdns('x\t_adb-tls-connect._tcp\t10.0.0.2:5555\nbad line _adb-tls-connect'), ['10.0.0.2:5555']);
+});
+
+const SETTINGS = fs.readFileSync(fileURLToPath(new URL('./settings-screen.xml', import.meta.url)), 'utf8');
+
+test('snapshot: actionable visible elements only, labels from inner texts, viewport clip, duplicate hints, texts line', () => {
+  const sn = buildSnapshot(SETTINGS);
+  assert.equal(sn.actionable, 22);   // rows below the screen (Roaming, Proxy) are not listed
+  const lines = sn.items.map(i => i.line);
+  assert.equal(lines[0], '@e1 button "Navigate up" [80,205]');
+  assert.ok(lines.includes('@e4 button "Wi-Fi · Connected to Home" [540,620]'));
+  assert.ok(lines.includes('@e5 switch #switch_widget (in "Wi-Fi") [960,620] checked'));   // duplicate id -> parent hint
+  assert.ok(lines.includes('@e18 button "NFC" [540,2360]'));                                // partly visible: center inside viewport
+  assert.equal(lines.some(l => /Roaming|Proxy/.test(l)), false);
+  assert.match(formatSnapshot(sn), /\ntext: "12:30" \| "Wi-Fi three bars\." \| "Battery 87 percent\." \| "Network & internet"$/);
+  const dup = buildSnapshot('<hierarchy><node class="android.widget.FrameLayout" bounds="[0,0][100,200]" /><node class="android.widget.Button" text="OK" clickable="true" bounds="[0,0][100,100]" /><node class="android.widget.Button" text="OK" clickable="true" bounds="[0,100][100,200]" /></hierarchy>');
+  assert.deepEqual(dup.items.map(i => i.disp), ['button "OK" (#1)', 'button "OK" (#2)']);
+  assert.equal(buildSnapshot(SETTINGS, { max: 5 }).hidden, 17);
+  assert.ok(formatSnapshot(buildSnapshot(SETTINGS, { max: 5 })).includes('+17 more'));
+});
+
+test('snapshot is much smaller than the full dump', async () => {
+  const m = mk(fake({ over: { uiautomator: SETTINGS } }));
+  const compact = m.call('ui_tree', {}).then(r => r.content[0].text.length);
+  const full = m.call('ui_tree', { all: false }).then(() => m.call('ui_tree', { all: true })).then(r => JSON.stringify(r).length);
+  assert.ok(await compact * 3 < await full);
+});
+
+test('tap_element by ref: resolves against the last snapshot; unknown and stale refs say to re-snapshot', async () => {
+  const f = fake({ over: { uiautomator: SETTINGS } }); const m = mk(f);
+  await assert.rejects(m.call('tap_element', { ref: '@e1' }), /unknown ref @e1: no snapshot taken yet.*ui_tree/);
+  await m.call('ui_tree', {});
+  const r = await m.call('tap_element', { ref: '@e2' });
+  assert.deepEqual([r.ok, r.ref, r.element], [true, '@e2', 'button "Search settings"']);
+  assert.equal(f.shells().pop(), 'input tap 980 205');
+  await m.call('tap_element', { ref: 'e5', long: true });
+  assert.equal(f.shells().pop(), 'input swipe 960 620 960 620 800');
+  await assert.rejects(m.call('tap_element', { ref: '@e99' }), /unknown ref @e99: the last snapshot has @e1\.\.@e22.*re-snapshot/i);
+  await assert.rejects(m.call('tap_element', { ref: 'banana' }), /invalid ref/);
+  // an action ran, screen unchanged -> the ref is re-verified and still works; screen changed -> stale error
+  const g = fake({ over: { uiautomator: SETTINGS } }); const n = mk(g);
+  await n.call('ui_tree', {}); await n.call('key', { key: 'back' });
+  await n.call('tap_element', { ref: '@e1' });
+  assert.equal(g.shells().pop(), 'input tap 80 205');
+  let xml = SETTINGS;
+  const h = fake({ over: { adb: a => a[3] === 'uiautomator' ? xml : undefined } }); const k = mk(h);
+  await k.call('ui_tree', {}); await k.call('key', { key: 'home' });
+  xml = XML;
+  await assert.rejects(k.call('tap_element', { ref: '@e1' }), /stale ref @e1 \(button "Navigate up"\).*re-snapshot with ui_tree/i);
+  await k.call('ui_tree', {});   // fresh snapshot of the new screen: refs follow it
+  await k.call('tap_element', { ref: '@e1' });
+});
+
+test('observe auto: ui list only for a normal screen; near-empty tree also attaches a screenshot and says why; env override', async () => {
+  const sparse = '<hierarchy><node class="android.view.View" bounds="[0,0][1080,2400]" /></hierarchy>';
+  const normal = await mk(fake({ over: { uiautomator: SETTINGS } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.deepEqual(normal.content.map(c => c.type), ['text', 'text']);
+  const g = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.deepEqual(g.content.map(c => c.type), ['text', 'text', 'image', 'text']);   // result, list+note, screenshot, its size info
+  assert.match(g.content[1].text, /only 0 actionable element\(s\).*game\/canvas\/Flutter\/WebView/);
+  const dflt = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: undefined }).call('key', { key: 'back' });   // default is auto
+  assert.ok(dflt.content.some(c => c.type === 'image'));
+  const ui = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'ui' }).call('key', { key: 'back' });
+  assert.equal(ui.content.some(c => c.type === 'image'), false);
+  const none = await mk(fake({ over: { uiautomator: sparse } }), { CONTROL_OBSERVE: 'none' }).call('key', { key: 'back' });
+  assert.deepEqual(none, { ok: true, keycode: 4 });
+  // dump unavailable (secure window): auto falls back to the screenshot alone
+  const sec = await mk(fake({ over: { uiautomator: 'ERROR: null root node', shell: { 'uiautomator dump': 'ERROR' } } }), { CONTROL_OBSERVE: 'auto' }).call('key', { key: 'back' });
+  assert.deepEqual(sec.content.map(c => c.type), ['text', 'text', 'image', 'text']);
+  assert.match(sec.content[1].text, /UI tree unavailable/);
+  assert.equal(SPARSE_BELOW, 3);
+  // observing refreshes the ref map
+  const f = fake({ over: { uiautomator: SETTINGS } }); const m = mk(f, { CONTROL_OBSERVE: 'auto' });
+  await m.call('key', { key: 'back' });
+  await m.call('tap_element', { ref: '@e2' });
+  assert.equal(f.shells().pop(), 'input tap 980 205');
 });

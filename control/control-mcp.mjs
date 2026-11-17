@@ -4,7 +4,7 @@
 //   ADB_BIN              adb binary (default: adb)
 //   ADB_SERIAL           device serial (default: first device in `adb devices`)
 //   CONTROL_MAX_SIDE     longest screenshot side in px when ImageMagick is available (default 1280, 0 = never resize)
-//   CONTROL_OBSERVE      default `observe` for action tools: none | ui | screenshot (default none)
+//   CONTROL_OBSERVE      default `observe` for action tools: none | ui | screenshot | auto (default auto: ui list, plus a screenshot when the tree is near-empty)
 //   CONTROL_SETTLE_MS    wait before observing after an action (default 700)
 //   CONTROL_AUTO_WAKE    0 = do not wake the screen before acting (default on)
 //   CONTROL_AUTO_CONNECT 0 = do not re-discover/reconnect wireless debugging when the device is gone (default on)
@@ -18,10 +18,14 @@ const bool = description => ({ type: 'boolean', description });
 const obj = (properties, required = []) => ({ type: 'object', properties, required });
 const XY = 'in screenshot pixels (the coordinate space of `screenshot` and `ui_tree`)';
 
-export const OBSERVE = ['none', 'ui', 'screenshot'];
+export const OBSERVE = ['none', 'ui', 'screenshot', 'auto'];
+/** fewer actionable elements than this = the UI tree is near-empty (canvas/game/Flutter/WebView/FLAG_SECURE): attach a screenshot */
+export const SPARSE_BELOW = 3;
+/** at most this many elements are listed (visible viewport only) */
+export const MAX_LIST = 60;
 /** extra arguments every action tool accepts */
 const ACT = {
-  observe: { type: 'string', enum: OBSERVE, description: 'after acting, wait settleMs and return the new screen: "ui" (compact element list, cheap) or "screenshot". Use it to verify each step without a separate call.' },
+  observe: { type: 'string', enum: OBSERVE, description: 'after acting, wait settleMs and return the new screen: "auto" (default: element list with @refs; a screenshot is added automatically when the UI tree is near-empty, e.g. games/canvas/Flutter/WebView), "ui" (list only), "screenshot" (image only) or "none".' },
   settleMs: num('wait before observing, default 700'),
 };
 const act = (properties, required) => obj({ ...properties, ...ACT }, required);
@@ -39,17 +43,17 @@ export const KEYS = {
 const POWER_KEYS = new Set([26, 223, 224, 'KEYCODE_POWER', 'KEYCODE_SLEEP', 'KEYCODE_WAKEUP', 'KEYCODE_SOFT_SLEEP']);
 
 export const INSTRUCTIONS = `This server drives a real Android phone over adb. You may operate it directly and autonomously: open apps, navigate, scroll, read and type without asking the user to do it for you, and keep going until the task is done.
-Loop: observe -> act -> verify. ui_tree is cheap and gives tap targets; use screenshot for images, layout or when ui_tree is empty (games, web canvases). Prefer tap_element (by text/desc/id) over raw coordinates. Add observe:"ui" (or "screenshot") to an action to get the resulting screen in the same call, use wait_for after slow transitions, and chain predictable steps with batch.
+Loop: observe -> act -> verify. Every action already returns the new screen (observe "auto"): a compact list of actionable elements with refs like @e3, plus a screenshot automatically when the UI tree is near-empty (games, canvases, Flutter, WebView, secure windows). Tap with tap_element ref:"@e3" (refs come from the LAST ui_tree/observe; after the screen changes take a new snapshot, a stale ref errors). Otherwise tap_element by text/desc/id, or raw x,y from a screenshot. Use screenshot for images and layout. Pass observe:"none" to skip, "ui" for the list only, or "screenshot", use wait_for after slow transitions, and chain predictable steps with batch.
 If something is not where you expected, look again (scroll, back, ui_tree all:true) before giving up. shell runs as the adb shell user, so am, pm, cmd, settings, dumpsys, content and input are available for anything the tools do not cover (intents, settings toggles, reading notifications with dumpsys notification).
 The server wakes the screen and reconnects wireless debugging by itself. Stop and ask the user only for a secure lock screen, a login/password, or an irreversible or outward action they did not ask for (payments, purchases, deleting data, sending messages or posts to someone new).`;
 
 export const TOOLS = {
   screenshot: { wake: true, description: 'Capture the phone screen. Returns the image plus its size and the scale to device pixels. All coordinates used by the other tools are in this image\'s pixel space.',
     schema: obj({}) },
-  ui_tree: { wake: true, description: 'Dump the current screen as a compact list of UI elements (text, desc, id, class, bounds, center, flags). Cheaper than a screenshot and the best way to find tap targets.',
-    schema: obj({ all: bool('include elements with no text/desc that are not clickable or scrollable') }) },
-  tap_element: { wake: true, action: true, description: 'Find an element by text/desc and/or id in the live UI and tap (or long-press) its center. Fails with the list of visible labels if nothing matches.',
-    schema: act({ ...QUERY, index: num('which match to use when several match, default 0'), long: bool('long-press instead of tap') }) },
+  ui_tree: { wake: true, description: 'Snapshot the screen as a compact list of the ACTIONABLE visible elements, each with a short ref: `@e1 button "로그인" [x,y]` (x,y = center in screenshot pixels; flags like checked/disabled follow; duplicate labels get an `in "parent"` or `#n` hint). Visible plain texts follow on one `text:` line. Refs are valid for tap_element until the screen changes; every ui_tree/observe refreshes them. With all:true you get the full raw node dump instead (refs still assigned to actionable nodes). Cheaper than a screenshot; if the tree is near-empty the output says so (use screenshot).',
+    schema: obj({ all: bool('full dump: every node with bounds, text, desc, id, class, flags (large); default is the compact actionable list') }) },
+  tap_element: { wake: true, action: true, description: 'Tap (or long-press) an element, preferably by `ref` ("@e3" from the last ui_tree/observe list; no re-search; errors if unknown/stale -> take a new ui_tree). Otherwise find it live by text/desc and/or id; fails with the list of visible labels if nothing matches.',
+    schema: act({ ref: str('element ref like "@e3" from the LAST ui_tree/observe list (takes precedence over text/id)'), ...QUERY, index: num('which match to use when several match, default 0'), long: bool('long-press instead of tap') }) },
   tap: { wake: true, action: true, description: 'Tap a point.', schema: act({ x: num(`x ${XY}`), y: num(`y ${XY}`) }, ['x', 'y']) },
   long_press: { wake: true, action: true, description: 'Press and hold a point.',
     schema: act({ x: num(`x ${XY}`), y: num(`y ${XY}`), durationMs: num('hold time, default 800') }, ['x', 'y']) },
@@ -104,29 +108,155 @@ const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
 const decode = s => s.replace(/&(#x?[0-9a-fA-F]+|\w+);/g, (m, e) =>
   e[0] === '#' ? String.fromCodePoint(e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)) : (ENTITIES[e] ?? m));
 
-/** uiautomator XML -> compact element list. Bounds are divided by `scale` (device px -> screenshot px). */
+/** uiautomator XML -> flat node list with tree links: { i, parent, a (attributes), b ([x1,y1,x2,y2] in screenshot px or null) }. */
+function parseTree(xml, scale = 1) {
+  const nodes = [], stack = [];
+  for (const m of String(xml).matchAll(/<node\b([^>]*?)(\/?)>|<\/node>/g)) {
+    if (m[0] === '</node>') { stack.pop(); continue; }
+    const a = {};
+    for (const [, k, v] of (m[1] || '').matchAll(/([\w-]+)="([^"]*)"/g)) a[k] = decode(v);
+    const b = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(a.bounds || '');
+    nodes.push({ i: nodes.length, parent: stack.length ? stack[stack.length - 1] : -1, a, b: b ? b.slice(1).map(n => Math.round(Number(n) / scale)) : null });
+    if (!m[2]) stack.push(nodes.length - 1);
+  }
+  return nodes;
+}
+const FLAG_ATTRS = ['clickable', 'long-clickable', 'scrollable', 'checkable', 'checked', 'selected', 'focused', 'password'];
+const isInteractive = a => a.clickable === 'true' || a['long-clickable'] === 'true' || a.scrollable === 'true' || a.checkable === 'true';
+
+/** uiautomator XML -> full element list. Bounds are divided by `scale` (device px -> screenshot px). */
 export function parseUiTree(xml, { scale = 1, all = false } = {}) {
   const nodes = [];
-  for (const m of String(xml).matchAll(/<node\b([^>]*)>/g)) {
-    const a = {};
-    for (const [, k, v] of m[1].matchAll(/([\w-]+)="([^"]*)"/g)) a[k] = decode(v);
-    const b = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(a.bounds || '');
+  for (const t of parseTree(xml, scale)) {
+    const { a, b } = t;
     if (!b) continue;
-    const flags = ['clickable', 'long-clickable', 'scrollable', 'checkable', 'checked', 'selected', 'focused', 'password']
-      .filter(f => a[f] === 'true');
+    const flags = FLAG_ATTRS.filter(f => a[f] === 'true');
     if (a.enabled === 'false') flags.push('disabled');
-    const interactive = a.clickable === 'true' || a['long-clickable'] === 'true' || a.scrollable === 'true' || a.checkable === 'true';
-    if (!all && !a.text && !a['content-desc'] && !interactive) continue;
-    const [x1, y1, x2, y2] = b.slice(1).map(n => Math.round(Number(n) / scale));
+    if (!all && !a.text && !a['content-desc'] && !isInteractive(a)) continue;
+    const [x1, y1, x2, y2] = b;
     const n = { bounds: [x1, y1, x2, y2], center: [Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2)] };
     if (a.text) n.text = a.text;
     if (a['content-desc']) n.desc = a['content-desc'];
     if (a['resource-id']) n.id = a['resource-id'].replace(/^.*:id\//, '');
     if (a.class) n.class = a.class.replace(/^.*\./, '');
     if (flags.length) n.flags = flags;
+    Object.defineProperty(n, 'treeIndex', { value: t.i });   // not serialized
     nodes.push(n);
   }
   return nodes;
+}
+
+const clip = (s, n) => { s = String(s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const q = s => `"${String(s).replace(/"/g, '\\"')}"`;
+
+function roleOf(a) {
+  const c = (a.class || '').replace(/^.*\./, '');
+  if (a.scrollable === 'true' && a.clickable !== 'true') return 'scroll';
+  if (/EditText|AutoCompleteTextView/.test(c)) return 'input';
+  if (/CheckBox/.test(c)) return 'checkbox';
+  if (/Switch|ToggleButton/.test(c)) return 'switch';
+  if (/RadioButton/.test(c)) return 'radio';
+  if (/Spinner/.test(c)) return 'select';
+  if (/Button/.test(c)) return 'button';
+  if (/Tab/.test(c)) return 'tab';
+  if (/TextView/.test(c)) return 'text';
+  return a.checkable === 'true' ? 'checkbox' : 'button';
+}
+
+/**
+ * Compact snapshot of the ACTIONABLE elements inside the visible viewport, each with a short ref (@e1...).
+ * Labels fall back to the texts inside the element, then to its resource id; duplicates get a parent hint or an ordinal.
+ * Non-actionable visible texts are listed on one trailing line (no refs) so content can still be read.
+ */
+export function buildSnapshot(xml, { scale = 1, max = MAX_LIST } = {}) {
+  const tree = parseTree(xml, scale);
+  const kids = tree.map(() => []);
+  for (const t of tree) if (t.parent >= 0) kids[t.parent].push(t.i);
+  const root = tree.find(t => t.b);
+  const view = root ? root.b : [0, 0, 0, 0];
+  const [vx1, vy1, vx2, vy2] = view;
+  const visible = b => {
+    if (!b) return null;
+    const c = [Math.max(b[0], vx1), Math.max(b[1], vy1), Math.min(b[2], vx2), Math.min(b[3], vy2)];
+    return c[2] > c[0] && c[3] > c[1] ? c : null;
+  };
+  const actionable = t => isInteractive(t.a) || /EditText|AutoCompleteTextView/.test(t.a.class || '');
+  const own = a => a.text || a['content-desc'] || '';
+  const used = new Set();
+  /** texts inside an element's subtree, not descending into nested actionable elements */
+  const inner = (i, out = []) => {
+    for (const k of kids[i]) {
+      const t = tree[k];
+      if (actionable(t)) continue;
+      if (visible(t.b) && own(t.a)) out.push(t);
+      inner(k, out);
+    }
+    return out;
+  };
+  const cands = [];
+  for (const t of tree) {
+    if (!actionable(t)) continue;
+    const c = visible(t.b);
+    if (!c) continue;
+    const role = roleOf(t.a);
+    let label = clip(own(t.a), 60);
+    const consumed = [];
+    if (!label && role !== 'scroll') {
+      const parts = [];
+      for (const k of inner(t.i)) { const v = clip(own(k.a), 30); if (v && !parts.includes(v) && parts.length < 3) { parts.push(v); consumed.push(k.i); } }
+      label = parts.join(' · ');
+    }
+    consumed.forEach(i => used.add(i));
+    const id = (t.a['resource-id'] || '').replace(/^.*:id\//, '');
+    const flags = FLAG_ATTRS.filter(f => ['checked', 'selected', 'focused', 'password'].includes(f) && t.a[f] === 'true');
+    if (role === 'scroll') flags.unshift('scrollable');
+    if (t.a.enabled === 'false') flags.push('disabled');
+    if (t.a['long-clickable'] === 'true' && t.a.clickable !== 'true') flags.push('long-press');
+    cands.push({ t, role, label, id, flags, center: [Math.round((c[0] + c[2]) / 2), Math.round((c[1] + c[3]) / 2)], bounds: c });
+  }
+  // disambiguate duplicates: nearest ancestor that tells them apart (its own label, its id, or a text beside the element), else an ordinal
+  const keyOf = e => `${e.role}|${e.label || '#' + e.id}`;
+  const groups = new Map();
+  for (const e of cands) (groups.get(keyOf(e)) ?? groups.set(keyOf(e), []).get(keyOf(e))).push(e);
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    const hintAt = (e, d) => {
+      let p = e.t.parent;
+      for (let k = 0; k < d && p >= 0; k++) p = tree[p].parent;
+      if (p < 0) return '';
+      const pa = tree[p].a;
+      return clip(own(pa), 30) || clip(inner(p).map(x => own(x.a)).find(v => v && v !== e.label) || '', 30) || (pa['resource-id'] || '').replace(/^.*:id\//, '');
+    };
+    for (let d = 1; d <= 5; d++) {   // climb until a hint tells this element apart from all the others in its group
+      const hs = g.map(e => e.hint ? '' : hintAt(e, d));
+      g.forEach((e, k) => { if (!e.hint && hs[k] && hs.filter(h => h === hs[k]).length === 1) e.hint = `in ${q(hs[k])}`; });
+    }
+    g.forEach((e, k) => { e.hint ||= `#${k + 1}`; });
+  }
+  const shown = cands.slice(0, max);
+  const items = shown.map((e, k) => {
+    const ref = `@e${k + 1}`;
+    const name = e.label ? q(e.label) : e.id ? `#${e.id}` : '';
+    const disp = [e.role, name, e.hint && `(${e.hint})`].filter(Boolean).join(' ');
+    const line = `${ref} ${disp} [${e.center[0]},${e.center[1]}]${e.flags.length ? ' ' + e.flags.join(',') : ''}`;
+    return { ref, role: e.role, label: e.label, disp, line, center: e.center, bounds: e.bounds, flags: e.flags, treeIndex: e.t.i };
+  });
+  const texts = [];
+  for (const t of tree) {
+    if (used.has(t.i) || actionable(t) || !own(t.a) || !visible(t.b)) continue;
+    const v = clip(own(t.a), 50);
+    if (!texts.includes(v)) texts.push(v);
+  }
+  return { screen: [vx2 - vx1, vy2 - vy1], actionable: cands.length, items, hidden: cands.length - shown.length, texts: texts.slice(0, 25), moreTexts: Math.max(0, texts.length - 25) };
+}
+
+/** Text form of a snapshot: header, one line per element, then the visible plain texts. */
+export function formatSnapshot(snap, scale = 1) {
+  const out = [`screen ${snap.screen[0]}x${snap.screen[1]} scale ${Number(scale.toFixed(4))} | ${snap.items.length} actionable (tap_element ref:"@eN", or tap x,y)`];
+  for (const i of snap.items) out.push(i.line);
+  if (snap.hidden) out.push(`(+${snap.hidden} more actionable elements not listed: scroll, or ui_tree all:true)`);
+  if (snap.texts.length) out.push('text: ' + snap.texts.map(q).join(' | ') + (snap.moreTexts ? ` (+${snap.moreTexts} more)` : ''));
+  return out.join('\n');
 }
 
 /** Elements matching {text, id, exact}, best first: exact before substring, clickable before not, then screen order. */
@@ -161,7 +291,7 @@ const describeQuery = a => [a.text != null && `text "${a.text}"`, a.id != null &
 export function createControlMcp({ exec = defaultExec, env = process.env, sleep = t => new Promise(r => setTimeout(r, t)), now = Date.now } = {}) {
   const adbBin = env.ADB_BIN || 'adb';
   const maxSide = env.CONTROL_MAX_SIDE === undefined || env.CONTROL_MAX_SIDE === '' ? 1280 : Number(env.CONTROL_MAX_SIDE) || 0;
-  const defaultObserve = OBSERVE.includes(env.CONTROL_OBSERVE) ? env.CONTROL_OBSERVE : 'none';
+  const defaultObserve = OBSERVE.includes(env.CONTROL_OBSERVE) ? env.CONTROL_OBSERVE : 'auto';
   const settleEnv = Number(env.CONTROL_SETTLE_MS || NaN);
   const defaultSettle = Number.isFinite(settleEnv) && settleEnv >= 0 ? settleEnv : 700;
   const autoWake = env.CONTROL_AUTO_WAKE !== '0';
@@ -169,6 +299,7 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   let resizer;                    // undefined = not probed, null = none, else binary name
   const sizes = new Map();        // serial -> { width, height }
   let awakeAt = -Infinity, connectAt = -Infinity, adbKeyboard;
+  let snap = { items: new Map(), dirty: false };   // ref map of the LAST ui_tree/observe; dirty = an action ran since
 
   async function run(bin, args, opts) {
     try { return await exec(bin, args, opts); } catch (e) {
@@ -272,7 +403,7 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   }
   const ms = (v, def, max) => { const n = Number(v ?? def); if (!Number.isFinite(n) || n < 0) throw new Error(`invalid duration: ${v}`); return Math.min(Math.round(n), max); };
 
-  async function uiNodes(all) {
+  async function uiXml() {
     let xml = '';
     try { xml = String((await adb(['exec-out', 'uiautomator', 'dump', '/dev/tty'], { timeout: 30000 })).stdout); } catch {}
     if (!xml.includes('<hierarchy')) {
@@ -280,8 +411,31 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
       xml = await sh(`uiautomator dump ${f} >/dev/null && cat ${f}; rm -f ${f}`, { timeout: 30000 });
     }
     if (!xml.includes('<hierarchy')) throw new Error('uiautomator dump failed: ' + xml.trim().slice(0, 200));
-    const s = await scale();
+    return { xml, scale: await scale() };
+  }
+  async function uiNodes(all) {
+    const { xml, scale: s } = await uiXml();
     return { scale: s, nodes: parseUiTree(xml, { scale: s, all }) };
+  }
+  /** dumps the UI, builds the ref list and (unless `store` is false) makes it the LAST snapshot that @refs resolve against */
+  async function snapshot({ store = true, xml: given } = {}) {
+    const { xml, scale: s } = given ?? await uiXml();
+    const built = buildSnapshot(xml, { scale: s });
+    if (store) snap = { items: new Map(built.items.map(i => [i.ref, i])), dirty: false };
+    return { ...built, scale: s, xml, sparse: built.actionable < SPARSE_BELOW,
+      text: formatSnapshot(built, s) + (built.actionable < SPARSE_BELOW ? `\nnote: only ${built.actionable} actionable element(s) in the UI tree (game/canvas/Flutter/WebView/secure window?): use screenshot and tap x,y` : '') };
+  }
+  /** @eN -> element of the last snapshot; if an action ran since, it must still be on screen (matched by role/label/hint) */
+  async function resolveRef(ref) {
+    const m = /^@?e(\d+)$/i.exec(String(ref).trim());
+    if (!m) throw new Error(`invalid ref: ${ref} (expected like "@e3", from ui_tree)`);
+    const key = `@e${m[1]}`, it = snap.items.get(key);
+    if (!it) throw new Error(`unknown ref ${key}: ${snap.items.size ? `the last snapshot has @e1..@e${snap.items.size}` : 'no snapshot taken yet'}. Re-snapshot with ui_tree (or add observe to an action) and use the refs it returns`);
+    if (!snap.dirty) return it;
+    const fresh = await snapshot({ store: false });
+    const now = fresh.items.find(i => i.disp === it.disp);
+    if (!now) throw new Error(`stale ref ${key} (${it.disp}): the screen changed since the last snapshot and it is no longer there. Re-snapshot with ui_tree and use the new refs`);
+    return now;
   }
 
   const labels = nodes => [...new Set(nodes.flatMap(n => [n.text, n.desc]).filter(Boolean))].slice(0, 30);
@@ -308,10 +462,19 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
       return { content: [{ type: 'image', data: Buffer.from(data).toString('base64'), mimeType }, { type: 'text', text: JSON.stringify(info) }] };
     },
     async ui_tree(a) {
-      const { scale: s, nodes } = await uiNodes(!!a.all);
-      return { count: nodes.length, scale: Number(s.toFixed(4)), nodes };
+      const x = await uiXml(), sn = await snapshot({ xml: x });   // refreshes the ref map
+      if (!a.all) return { content: [{ type: 'text', text: sn.text }] };
+      const refOf = new Map(sn.items.map(i => [i.treeIndex, i.ref]));
+      const nodes = parseUiTree(x.xml, { scale: x.scale, all: true }).map(n => refOf.has(n.treeIndex) ? { ref: refOf.get(n.treeIndex), ...n } : n);
+      return { count: nodes.length, scale: Number(x.scale.toFixed(4)), nodes };
     },
     async tap_element(a) {
+      if (a.ref !== undefined && a.ref !== null && a.ref !== '') {
+        const el = await resolveRef(a.ref), s = await scale();
+        const [x, y] = el.center.map(v => Math.round(v * s));
+        await sh(a.long ? `input swipe ${x} ${y} ${x} ${y} 800` : `input tap ${x} ${y}`, { timeout: 20000 });
+        return { ok: true, ref: el.ref, element: el.disp, center: el.center };
+      }
       const { nodes } = await uiNodes(true);
       const hits = findElements(nodes, a);
       const i = a.index === undefined ? 0 : Number(a.index);
@@ -470,8 +633,17 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
   async function observe(mode, settleMs) {
     await sleep(settleMs);
     if (mode === 'screenshot') return (await impl.screenshot()).content;
-    const t = await impl.ui_tree({});
-    return [{ type: 'text', text: JSON.stringify({ screen: t }) }];
+    let sn;
+    try { sn = await snapshot(); } catch (e) {
+      if (mode !== 'auto') throw e;
+      const shot = (await impl.screenshot()).content;   // tree unavailable (secure window?): the picture is all there is
+      return [{ type: 'text', text: `note: UI tree unavailable (${String(e.message || e).slice(0, 120)}); screenshot attached` }, ...shot];
+    }
+    const out = [{ type: 'text', text: sn.text }];
+    if (mode === 'auto' && sn.sparse) {
+      try { out.push(...(await impl.screenshot()).content); } catch (e) { out[0].text += `\n(screenshot failed: ${String(e.message || e).slice(0, 120)})`; }
+    }
+    return out;
   }
 
   async function call(name, args = {}) {
@@ -483,6 +655,7 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     const settle = mode === 'none' ? 0 : ms(args.settleMs, defaultSettle, 10000);
     if (t.wake) await awake();
     const r = await impl[name](args);
+    if (t.action) snap.dirty = true;   // the screen may have changed: refs must be re-verified until the next snapshot
     if (mode === 'none') return r;
     if (r?.isError) return r;   // a failed batch: do not bury the error under an observation
     const content = r?.content ? [...r.content] : [{ type: 'text', text: JSON.stringify(r) }];
@@ -503,7 +676,7 @@ export function createControlMcp({ exec = defaultExec, env = process.env, sleep 
     switch (method) {
       case 'initialize':
         return ok(id, { protocolVersion: params?.protocolVersion || '2024-11-05', capabilities: { tools: {} },
-          serverInfo: { name: 'droid-control', version: '0.8.0' }, instructions: INSTRUCTIONS });
+          serverInfo: { name: 'droid-control', version: '0.9.0' }, instructions: INSTRUCTIONS });
       case 'ping': return ok(id, {});
       case 'tools/list':
         return ok(id, { tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.description, inputSchema: t.schema })) });

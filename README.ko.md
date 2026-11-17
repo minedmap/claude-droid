@@ -164,13 +164,14 @@ proot-distro login ubuntu -- /root/.local/bin/claude mcp list
 
 - 도구 16개: `screenshot`, `ui_tree`, `tap_element`, `tap`, `long_press`, `swipe`, `scroll`, `type`, `key`, `open_app`, `open_url`, `wait_for`, `batch`, `list_apps`, `shell`, `device_info`.
 - 자율 조작용으로 설계했습니다. 서버가 MCP instructions로 에이전트에게 폰을 직접 조작하도록(관찰 → 실행 → 확인) 안내하고, 잠금 화면, 로그인, 되돌릴 수 없는 작업에서만 멈추게 합니다.
-  - `tap_element`: 텍스트/설명/id로 탭하므로 좌표가 필요 없습니다.
+  - 하이브리드 제어: `ui_tree`는 화면에 보이는 조작 가능한 요소만 짧은 ref와 함께 압축해 돌려줍니다(`@e1 button "로그인" [540,1200]`, 같은 라벨은 `in "부모"` 또는 `#n` 힌트 추가). `tap_element ref:"@e1"`는 마지막 스냅샷 기준으로 탭하고, 모르는/낡은 ref는 `ui_tree`를 다시 하라는 오류를 냅니다. `ui_tree all:true`는 전체 원본 덤프입니다.
+  - `tap_element`는 텍스트/설명/id로도 탭하므로 좌표가 필요 없습니다.
   - `wait_for`: 요소가 나타나거나 사라질 때까지 기다립니다.
   - `batch`: 여러 단계를 한 번에 실행합니다.
-  - 모든 동작 도구에 `observe: "ui" | "screenshot"`를 주면 결과 화면을 같은 호출에서 돌려받습니다.
+  - 모든 동작 도구는 `observe: "auto" | "ui" | "screenshot" | "none"`로 결과 화면을 같은 호출에서 돌려줍니다. 기본 `auto`: ref 목록을 주고, UI 트리가 거의 비면(게임, 캔버스, Flutter, WebView, 보안 창) 스크린샷을 자동으로 함께 붙입니다.
 - 동작 전에 화면을 자동으로 켭니다(`CONTROL_AUTO_WAKE=0`이면 끔). 기기 연결이 끊기면(무선 디버깅 포트 변경 등) mDNS로 다시 찾아 재연결합니다(`CONTROL_AUTO_CONNECT=0`이면 끔).
 - 의존성 없음. ImageMagick이 있으면 스크린샷을 1280px로 줄입니다(`CONTROL_MAX_SIDE`). 모든 좌표는 스크린샷 픽셀 기준이며 서버가 기기 픽셀로 환산합니다.
-- `ADB_SERIAL`은 기기, `ADB_BIN`은 adb 바이너리, `CONTROL_OBSERVE`는 기본 `observe`, `CONTROL_SETTLE_MS`는 관찰 전 대기 시간(기본 700)을 지정합니다.
+- `ADB_SERIAL`은 기기, `ADB_BIN`은 adb 바이너리, `CONTROL_OBSERVE`(`none|ui|screenshot|auto`, 기본 `auto`)는 기본 `observe`, `CONTROL_SETTLE_MS`는 관찰 전 대기 시간(기본 700)을 지정합니다.
 - 한글/이모지 입력: [ADBKeyboard](https://github.com/senzhk/ADBKeyBoard)를 한 번 설치하세요(`adb install ADBKeyboard.apk`). `type`이 입력하는 동안에만 키보드를 바꾸고, 끝나면 원래 키보드로 돌려놓습니다. 없으면 ASCII만 입력됩니다.
 
 ## USB 호스트 제어 (v0.6)

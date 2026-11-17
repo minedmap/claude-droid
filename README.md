@@ -177,13 +177,14 @@ Phone control is separate from the Claude Code chat. It needs **no bridge and no
 
 - 16 tools: `screenshot`, `ui_tree`, `tap_element`, `tap`, `long_press`, `swipe`, `scroll`, `type`, `key`, `open_app`, `open_url`, `wait_for`, `batch`, `list_apps`, `shell`, `device_info`.
 - Built for autonomous use: the server sends MCP instructions that tell the agent to operate the phone itself (observe, act, verify) and to stop only for lock screens, logins and irreversible actions.
-  - `tap_element` taps by text/desc/id, so the agent needs no coordinates.
+  - Hybrid control: `ui_tree` returns a compact list of the actionable visible elements with short refs (`@e1 button "Login" [540,1200]`; duplicate labels get an `in "parent"` or `#n` hint). `tap_element ref:"@e1"` taps from the LAST snapshot; an unknown or stale ref errors and asks for a new `ui_tree`. `ui_tree all:true` is the full raw dump.
+  - `tap_element` also taps by text/desc/id, so the agent needs no coordinates.
   - `wait_for` waits for an element to appear or disappear.
   - `batch` runs many steps in one call.
-  - Any action accepts `observe: "ui" | "screenshot"`, which returns the resulting screen in the same call.
+  - Any action accepts `observe: "auto" | "ui" | "screenshot" | "none"` and returns the resulting screen in the same call. Default `auto`: the ref list, plus a screenshot automatically when the UI tree is near-empty (games, canvas, Flutter, WebView, secure windows).
 - The screen is woken automatically before acting (`CONTROL_AUTO_WAKE=0` turns this off). If the device is gone (for example after the wireless debugging port changes), the server re-discovers it over mDNS and reconnects (`CONTROL_AUTO_CONNECT=0` turns this off).
 - Zero dependencies. If ImageMagick is installed, screenshots are downsized to 1280 px (`CONTROL_MAX_SIDE`); all coordinates are in screenshot pixels and are scaled back to device pixels by the server.
-- `ADB_SERIAL` picks a device, `ADB_BIN` picks the adb binary, `CONTROL_OBSERVE` sets the default `observe`, `CONTROL_SETTLE_MS` sets the wait before observing (default 700).
+- `ADB_SERIAL` picks a device, `ADB_BIN` picks the adb binary, `CONTROL_OBSERVE` (`none|ui|screenshot|auto`, default `auto`) sets the default `observe`, `CONTROL_SETTLE_MS` sets the wait before observing (default 700).
 - Non-ASCII text (Korean, emoji): install [ADBKeyboard](https://github.com/senzhk/ADBKeyBoard) once (`adb install ADBKeyboard.apk`). `type` switches to it only while typing, then restores your keyboard. Without it, `type` is ASCII only (adb `input text`).
 
 ## USB host control (v0.6)
